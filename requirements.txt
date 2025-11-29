@@ -16,4 +16,6 @@ scikit-image>=0.21.0
 natsort>=8.0.0
 matplotlib>=3.7.0
 tensorboard>=2.15.0
+optuna>=3.5.0
+plotly>=5.18.0
 

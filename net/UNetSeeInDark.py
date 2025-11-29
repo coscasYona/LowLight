@@ -162,59 +162,6 @@ class ChannelAttentionBlock(nn.Module):
         return x + x_norm * y
 
 
-class AttentionBlock(nn.Module):
-    """
-    Standard self-attention (O(n²) memory) - kept for compatibility
-    Can optionally use Flash Attention if available
-    """
-    def __init__(self, channels: int, use_flash: bool = False):
-        super().__init__()
-        self.use_flash = use_flash
-        self.norm = nn.GroupNorm(8, channels)
-        self.q = nn.Conv2d(channels, channels, 1)
-        self.k = nn.Conv2d(channels, channels, 1)
-        self.v = nn.Conv2d(channels, channels, 1)
-        self.proj = nn.Conv2d(channels, channels, 1)
-        self.apply(_init_conv)
-        
-        # Try to import flash attention
-        self.has_flash = False
-        if use_flash:
-            try:
-                from flash_attn import flash_attn_func
-                self.flash_attn_func = flash_attn_func
-                self.has_flash = True
-            except ImportError:
-                self.has_flash = False
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, c, h, w = x.shape
-        x_norm = self.norm(x)
-        
-        q = self.q(x_norm)
-        k = self.k(x_norm)
-        v = self.v(x_norm)
-        
-        if self.has_flash and self.use_flash:
-            # Flash Attention path (if available)
-            # Reshape for flash attention: [B, C, H, W] -> [B, H*W, C]
-            q = q.reshape(b, c, h * w).permute(0, 2, 1).contiguous()
-            k = k.reshape(b, c, h * w).permute(0, 2, 1).contiguous()
-            v = v.reshape(b, c, h * w).permute(0, 2, 1).contiguous()
-            
-            out = self.flash_attn_func(q, k, v)
-            out = out.permute(0, 2, 1).reshape(b, c, h, w)
-        else:
-            # Standard attention path
-            q = q.reshape(b, c, h * w).permute(0, 2, 1)
-            k = k.reshape(b, c, h * w)
-            v = v.reshape(b, c, h * w).permute(0, 2, 1)
-
-            attn = torch.softmax(torch.bmm(q, k) / math.sqrt(c), dim=-1)
-            out = torch.bmm(attn, v).permute(0, 2, 1).reshape(b, c, h, w)
-        
-        out = self.proj(out)
-        return out + x
 
 
 class DownsampleBlock(nn.Module):
@@ -226,12 +173,8 @@ class DownsampleBlock(nn.Module):
                 self.attn = LinearAttentionBlock(out_ch)
             elif attn_type == "channel":
                 self.attn = ChannelAttentionBlock(out_ch)
-            elif attn_type == "standard":
-                self.attn = AttentionBlock(out_ch, use_flash=False)
-            elif attn_type == "flash":
-                self.attn = AttentionBlock(out_ch, use_flash=True)
             else:
-                raise ValueError(f"Unknown attention type: {attn_type}")
+                raise ValueError(f"Unknown attention type: {attn_type}. Use 'linear' or 'channel'")
         else:
             self.attn = nn.Identity()
         self.down = nn.Conv2d(out_ch, out_ch, 3, stride=2, padding=1)
@@ -254,12 +197,8 @@ class UpsampleBlock(nn.Module):
                 self.attn = LinearAttentionBlock(out_ch)
             elif attn_type == "channel":
                 self.attn = ChannelAttentionBlock(out_ch)
-            elif attn_type == "standard":
-                self.attn = AttentionBlock(out_ch, use_flash=False)
-            elif attn_type == "flash":
-                self.attn = AttentionBlock(out_ch, use_flash=True)
             else:
-                raise ValueError(f"Unknown attention type: {attn_type}")
+                raise ValueError(f"Unknown attention type: {attn_type}. Use 'linear' or 'channel'")
         else:
             self.attn = nn.Identity()
         self.apply(_init_conv)
@@ -333,12 +272,10 @@ class SlimUNet(nn.Module):
 
 class PhysicsGuidedStableDiffusion(nn.Module):
     """
-    Improved diffusion-inspired denoiser with memory-efficient attention.
-    Supports multiple attention types:
+    Memory-efficient diffusion-inspired denoiser with slim architecture.
+    Supports efficient attention types:
     - "linear": O(n) memory complexity (default, recommended)
     - "channel": O(C) memory complexity (most efficient)
-    - "standard": O(n²) memory complexity (original)
-    - "flash": Flash Attention if available (fastest, requires flash-attn package)
     """
 
     def __init__(

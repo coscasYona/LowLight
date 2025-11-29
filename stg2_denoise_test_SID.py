@@ -165,8 +165,8 @@ def valid(args, writer=None, epoch=None):
             test_fns = dataset.read_paired_fns(args.fuji_test_list)
             evaldir = args.fuji_eval_dir if hasattr(args, 'fuji_eval_dir') and args.fuji_eval_dir else args.eval_dir
         else:
-            eval_fns = dataset.read_paired_fns('./dataset/Sony_val.txt')
-            test_fns = dataset.read_paired_fns('./dataset/Sony_test.txt')
+        eval_fns = dataset.read_paired_fns('./dataset/Sony_val.txt')
+        test_fns = dataset.read_paired_fns('./dataset/Sony_test.txt')
             evaldir = args.eval_dir
 
         eval_fns_list = [

@@ -105,6 +105,15 @@ def main(args):
         args.resume = "continue"
         args.last_ckpt = args.save_path + args.save_prefix + str(initial_epoch) + '.pth'
 
+    # Get attention type (default to 'linear' for efficient training)
+    attn_type = getattr(args, 'sd_attn_type', 'linear')
+    scheduler_type = getattr(args, 'sd_scheduler', 'ddpm')
+    
+    if attn_type is None:
+        attn_type = 'linear'
+    
+    print(f"Using attention type: {attn_type} (memory-efficient)")
+    
     # net architecture
     dn_net = Net(
         in_channels=args.in_channels,
@@ -114,9 +123,11 @@ def main(args):
         num_steps=args.sd_num_steps,
         time_embed_dim=args.sd_time_embed_dim,
         cond_embed_dim=args.sd_cond_dim,
-        attn_type=getattr(args, 'sd_attn_type', 'linear'),
-        scheduler=getattr(args, 'sd_scheduler', 'ddpm'),
+        attn_type=attn_type,
+        scheduler=scheduler_type,
     )
+    
+    print(f"Model architecture: attention_type={attn_type}, scheduler={scheduler_type}")
 
     # loss function
     criterion = nn.MSELoss().to(DEVICE)
@@ -149,6 +160,8 @@ def main(args):
             }
             missing_keys = [k for k in model_dict.keys() if k not in compatible]
             unexpected_keys = [k for k in pretrained_dict.keys() if k not in compatible]
+            
+            
             if missing_keys or unexpected_keys:
                 print("Checkpoint mismatch detected; restarting from scratch.")
                 print(f"Missing keys: {len(missing_keys)}, unexpected keys: {len(unexpected_keys)}")
@@ -159,6 +172,7 @@ def main(args):
                 optimizer_dn.load_state_dict(tmp_ckpt['optimizer_state'])
                 start_epoch = initial_epoch + 1
                 resume_loaded = True
+                print(f"✓ Successfully loaded checkpoint from epoch {initial_epoch}")
         except (FileNotFoundError, RuntimeError, KeyError) as exc:
             print(f"Failed to load checkpoint '{args.last_ckpt}': {exc}. Starting new training.")
 
@@ -252,6 +266,8 @@ def main(args):
         if epoch_losses:
             avg_epoch_loss = np.mean(epoch_losses)
             writer.add_scalar('Train/EpochLoss', avg_epoch_loss, epoch)
+            # Store for Optuna
+            args._final_epoch_loss = avg_epoch_loss
 
         if epoch % args.save_every_epochs == 0:
             # save model and checkpoint
@@ -270,6 +286,16 @@ def main(args):
     # Close TensorBoard writer
     writer.close()
     print("Training completed. TensorBoard logs saved.")
+    
+    # Return final epoch loss for Optuna (average of last epoch)
+    final_epoch_losses = []
+    for epoch in range(start_epoch, args.epoch + 1):
+        # This will be set in the loop, but we need to track it
+        pass
+    
+    # Get the last epoch's average loss if available
+    # We'll track it during training
+    return getattr(args, '_final_epoch_loss', None)
 
 if __name__ == "__main__":
 

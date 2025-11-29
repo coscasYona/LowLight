@@ -53,8 +53,8 @@ parser.add_argument("--sd_channel_mults", type=str, default="1,2,4", help="Comma
 parser.add_argument("--sd_num_steps", type=int, default=4, help="Diffusion refinement iterations")
 parser.add_argument("--sd_time_embed_dim", type=int, default=64, help="Time embedding width")
 parser.add_argument("--sd_cond_dim", type=int, default=64, help="Physics conditioning width")
-parser.add_argument("--sd_attn_type", type=str, default="linear", choices=["linear", "channel", "standard", "flash"],
-                    help="Attention type: linear (O(n) memory, recommended), channel (O(C) memory, most efficient), standard (O(n²), original), flash (requires flash-attn)")
+parser.add_argument("--sd_attn_type", type=str, default="linear", choices=["linear", "channel"],
+                    help="Attention type: linear (O(n) memory, recommended), channel (O(C) memory, most efficient)")
 parser.add_argument("--sd_scheduler", type=str, default="ddpm", choices=["ddpm", "ddim"],
                     help="Diffusion scheduler: ddpm (stochastic, original), ddim (deterministic, faster)")
 parser.add_argument("--use_gradient_checkpointing", action="store_true",

@@ -20,14 +20,6 @@ The architecture has been upgraded with memory-efficient attention mechanisms an
 - **Memory Savings**: ~95% reduction compared to standard attention
 - **Usage**: `--sd_attn_type channel`
 
-#### Standard Attention (Original)
-- **Memory Complexity**: O(n²)
-- **Usage**: `--sd_attn_type standard` (for comparison)
-
-#### Flash Attention (Fastest, if available)
-- **Requires**: `flash-attn` package installation
-- **Benefits**: Fastest computation with optimized memory usage
-- **Usage**: `--sd_attn_type flash`
 
 ### 2. Improved Diffusion Schedulers
 
@@ -53,10 +45,8 @@ For a typical 128x128 patch with 32 base channels:
 
 | Attention Type | Memory (MB) | Relative |
 |---------------|-------------|----------|
-| Standard (O(n²)) | ~800 MB | 1.0x |
-| Linear (O(n)) | ~80 MB | 0.1x |
-| Channel (O(C)) | ~40 MB | 0.05x |
-| Flash (optimized) | ~60 MB | 0.075x |
+| Linear (O(n)) | ~80 MB | 1.0x |
+| Channel (O(C)) | ~40 MB | 0.5x |
 
 ## Usage Examples
 
@@ -109,8 +99,8 @@ DDIM uses a deterministic sampling process that allows:
 
 ## Performance Impact
 
-- **Linear Attention**: ~5-10% slower than standard, but 90% less memory
-- **Channel Attention**: ~2-5% slower, 95% less memory
+- **Linear Attention**: Default, best balance of memory and performance
+- **Channel Attention**: Most memory efficient, ~2-5% slower than linear
 - **Gradient Checkpointing**: ~20% slower, 40-50% less memory
 - **DDIM**: Faster inference, similar quality
 
@@ -118,10 +108,9 @@ DDIM uses a deterministic sampling process that allows:
 
 1. **For limited GPU memory**: Use `--sd_attn_type channel --use_gradient_checkpointing`
 2. **For best balance**: Use `--sd_attn_type linear` (default)
-3. **For fastest training**: Use `--sd_attn_type flash` (if available)
-4. **For inference**: Use `--sd_scheduler ddim` for faster, deterministic results
+3. **For inference**: Use `--sd_scheduler ddim` for faster, deterministic results
 
-## Backward Compatibility
+## Architecture
 
-The original architecture is preserved. Existing checkpoints can be loaded, though attention type changes may require retraining for optimal performance.
+The slim network architecture uses only memory-efficient attention mechanisms. The old O(n²) standard attention has been removed for cleaner, more efficient code.
 
