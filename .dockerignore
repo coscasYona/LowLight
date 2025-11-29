@@ -1,0 +1,53 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+
+# Virtual environments
+venv/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files (too large, should be mounted)
+data/
+*.ARW
+*.dng
+*.CR2
+*.mat
+
+# Checkpoints and outputs (should be mounted)
+runs/
+denoise_last_ckpt/
+*.pth
+*.pt
+*.ckpt
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.tmp
+*.temp
+

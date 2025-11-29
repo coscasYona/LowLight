@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  stg2-train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: stg2-lld-noise-model:latest
+    container_name: stg2_denoise_train
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      # Mount data directory
+      - ./data:/workspace/Stg2_LLD_Noise_Model/data:ro
+      # Mount dataset directory if external
+      - ./dataset:/workspace/Stg2_LLD_Noise_Model/dataset:ro
+      # Mount outputs directory (writable)
+      - ./runs:/workspace/Stg2_LLD_Noise_Model/runs
+      - ./denoise_last_ckpt:/workspace/Stg2_LLD_Noise_Model/denoise_last_ckpt
+    shm_size: 8gb
+    mem_limit: 32g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
