@@ -19,7 +19,10 @@ services:
       # Mount outputs directory (writable)
       - ./runs:/workspace/Stg2_LLD_Noise_Model/runs
       - ./denoise_last_ckpt:/workspace/Stg2_LLD_Noise_Model/denoise_last_ckpt
-    shm_size: 8gb
+    ports:
+      # TensorBoard port
+      - "6006:6006"
+    shm_size: 16gb
     mem_limit: 32g
     deploy:
       resources:

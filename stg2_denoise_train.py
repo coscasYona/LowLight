@@ -114,12 +114,21 @@ def main(args):
         num_steps=args.sd_num_steps,
         time_embed_dim=args.sd_time_embed_dim,
         cond_embed_dim=args.sd_cond_dim,
+        attn_type=getattr(args, 'sd_attn_type', 'linear'),
+        scheduler=getattr(args, 'sd_scheduler', 'ddpm'),
     )
 
     # loss function
     criterion = nn.MSELoss().to(DEVICE)
     # Move to device / DataParallel if available
     dn_net = dn_net.to(DEVICE)
+    
+    # Enable gradient checkpointing if requested (saves memory)
+    if getattr(args, 'use_gradient_checkpointing', False):
+        if hasattr(dn_net, 'unet'):
+            dn_net.unet.enable_gradient_checkpointing = True
+        print("Gradient checkpointing enabled (trades compute for memory)")
+    
     if DEVICE.type == 'cuda' and torch.cuda.device_count() > 1:
         dn_model = nn.DataParallel(dn_net)
     else:
