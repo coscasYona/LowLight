@@ -51,3 +51,8 @@ def build_sid_raw_dataset(dataset_root, list_path, patchsize):
     """Factory helper to keep the main dataloader selection logic simple."""
     return SIDRawDenoiseDataset(dataset_root, list_path, patchsize=patchsize)
 
+
+def build_fuji_raw_dataset(dataset_root, list_path, patchsize):
+    """Factory helper for Fuji 2025 dataset - uses same structure as SID."""
+    return SIDRawDenoiseDataset(dataset_root, list_path, patchsize=patchsize)
+

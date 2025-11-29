@@ -25,6 +25,8 @@ from dataset.sid_dataset import worker_init_fn
 from net.UNetSeeInDark import Net
 import util.util as util
 from data_process import *
+import rawpy
+from torch.utils.tensorboard import SummaryWriter
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -138,7 +140,7 @@ def read_wb_ccm(raw):
         ccm = np.eye(3, dtype=np.float32)
     return wb, ccm
 
-def valid(args):
+def valid(args, writer=None, epoch=None):
     # torch.set_num_threads(4)
     # new or continue
     initial_epoch = findLastCheckpoint(save_dir=args.save_path, save_pre = args.save_prefix)
@@ -148,11 +150,24 @@ def valid(args):
         args.last_ckpt = args.save_path + args.save_prefix + str(initial_epoch) + '.pth'
 
     if args.resume == "continue":
-        # load  validation set
+        # load  validation set - support both SID and Fuji
         expo_ratio = [100, 250, 300]
         read_expo_ratio = lambda x: float(x.split('_')[-1][:-5])
-        eval_fns = dataset.read_paired_fns('./dataset/Sony_val.txt')
-        test_fns = dataset.read_paired_fns('./dataset/Sony_test.txt')
+        
+        # Check if using Fuji dataset
+        use_fuji = args.use_fuji_raw or (args.fuji_val_list is not None)
+        if use_fuji:
+            if args.fuji_val_list is None:
+                raise ValueError("fuji_val_list must be specified when using Fuji RAW data")
+            if args.fuji_test_list is None:
+                raise ValueError("fuji_test_list must be specified when using Fuji RAW data")
+            eval_fns = dataset.read_paired_fns(args.fuji_val_list)
+            test_fns = dataset.read_paired_fns(args.fuji_test_list)
+            evaldir = args.fuji_eval_dir if hasattr(args, 'fuji_eval_dir') and args.fuji_eval_dir else args.eval_dir
+        else:
+            eval_fns = dataset.read_paired_fns('./dataset/Sony_val.txt')
+            test_fns = dataset.read_paired_fns('./dataset/Sony_test.txt')
+            evaldir = args.eval_dir
 
         eval_fns_list = [
             [fn for fn in eval_fns if min(int(read_expo_ratio(fn[1]) / read_expo_ratio(fn[0])), 300) == ratio] for ratio
@@ -163,9 +178,8 @@ def valid(args):
         eval_fns_list = [lst_1 + lst_2 for lst_1, lst_2 in zip(eval_fns_list, test_fns_list)]
 
         cameras = ['CanonEOS5D4', 'CanonEOS70D', 'CanonEOS700D', 'NikonD850', 'SonyA7S2']
-        evaldir = '/home/caoyue/caoyue/pytorch/dataset/SID/Sony'
         eval_datasets = [
-            datasets.SIDDataset(args.eval_dir, fns, size=None, augment=False, memorize=False, stage_in='raw',
+            datasets.SIDDataset(evaldir, fns, size=None, augment=False, memorize=False, stage_in='raw',
                                 stage_out='raw', gt_wb=0, CRF=False) for fns in eval_fns_list]
 
         eval_dataloaders = [torch.utils.data.DataLoader(
@@ -214,6 +228,10 @@ def valid(args):
         psnr_all = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], np.float32)
         ssim_all = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], np.float32)
         # res = engine.eval(dataloader, dataset_name='eld_eval_{}'.format(camera), correct=False, crop=False)
+        
+        # Track images for TensorBoard (store first few samples from each ratio)
+        images_to_log = {0: [], 1: [], 2: []}  # Store (noisy, denoised, clean) tuples per ratio
+        max_images_per_ratio = 3  # Log up to 3 images per ratio
 
         for jj in range(3):
 
@@ -282,7 +300,26 @@ def valid(args):
                 name = target_path.split('/')[-1][0:5] + "_[" + ratio_int_str + "]_OurNM_"
                 raw = rawpy.imread(target_path)
                 wb, ccm = read_wb_ccm(raw)
-                output = raw2rgb_rawpy(imgs_dn, wb=wb, ccm=SonyCCM)
+                
+                # Convert images to RGB for visualization
+                # raw2rgb_rawpy expects CHW format (4 channels)
+                noisy_tensor_chw = noisy[0].cpu().clamp(0., 1.).float()
+                clean_tensor_chw = clean[0].cpu().clamp(0., 1.).float()
+                imgs_dn_chw = imgs_dn[0].cpu().clamp(0., 1.).float()
+                
+                noisy_rgb = raw2rgb_rawpy(noisy_tensor_chw.numpy(), wb=wb, ccm=SonyCCM)
+                output = raw2rgb_rawpy(imgs_dn_chw.numpy(), wb=wb, ccm=SonyCCM)
+                clean_rgb = raw2rgb_rawpy(clean_tensor_chw.numpy(), wb=wb, ccm=SonyCCM)
+                
+                # Store images for TensorBoard logging (first few samples per ratio)
+                if writer is not None and epoch is not None and len(images_to_log[jj]) < max_images_per_ratio:
+                    images_to_log[jj].append({
+                        'noisy': noisy_rgb,
+                        'denoised': output,
+                        'clean': clean_rgb,
+                        'psnr': psnr,
+                        'ssim': ssim
+                    })
                 # print(output.shape)
                 save_path = "./OurNM_image/"
                 if not os.path.exists(save_path):
@@ -304,6 +341,58 @@ def valid(args):
             psnr_all[jj+3] = psnr_val_alpha / count
             ssim_all[jj] = ssim_val / count
             ssim_all[jj+3] = ssim_val_alpha / count
+            
+            # Log validation metrics to TensorBoard
+            if writer is not None and epoch is not None:
+                ratio_values = [100, 250, 300]
+                ratio_name = f"ratio_{ratio_values[jj]}"
+                writer.add_scalar(f'Validation_SID/PSNR_{ratio_name}', psnr_all[jj], epoch)
+                writer.add_scalar(f'Validation_SID/SSIM_{ratio_name}', ssim_all[jj], epoch)
+                writer.add_scalar(f'Validation_SID/PSNR_alpha_{ratio_name}', psnr_all[jj+3], epoch)
+                writer.add_scalar(f'Validation_SID/SSIM_alpha_{ratio_name}', ssim_all[jj+3], epoch)
+        
+        # Log images to TensorBoard
+        if writer is not None and epoch is not None:
+            ratio_values = [100, 250, 300]
+            for jj in range(3):
+                ratio_name = f"ratio_{ratio_values[jj]}"
+                for img_idx, img_data in enumerate(images_to_log[jj]):
+                    # Convert BGR to RGB for TensorBoard (OpenCV uses BGR)
+                    noisy_rgb = img_data['noisy'][:, :, ::-1]  # BGR to RGB
+                    denoised_rgb = img_data['denoised'][:, :, ::-1]
+                    clean_rgb = img_data['clean'][:, :, ::-1]
+                    
+                    # Normalize to [0, 1] for TensorBoard
+                    noisy_rgb = noisy_rgb.astype(np.float32) / 255.0
+                    denoised_rgb = denoised_rgb.astype(np.float32) / 255.0
+                    clean_rgb = clean_rgb.astype(np.float32) / 255.0
+                    
+                    # Convert to HWC format and add batch dimension
+                    noisy_tensor = torch.from_numpy(noisy_rgb).permute(2, 0, 1).unsqueeze(0)
+                    denoised_tensor = torch.from_numpy(denoised_rgb).permute(2, 0, 1).unsqueeze(0)
+                    clean_tensor = torch.from_numpy(clean_rgb).permute(2, 0, 1).unsqueeze(0)
+                    
+                    # Create a grid with noisy, denoised, and clean images
+                    image_grid = torch.cat([noisy_tensor, denoised_tensor, clean_tensor], dim=0)
+                    
+                    writer.add_images(
+                        f'Validation_SID/Images_{ratio_name}/sample_{img_idx}',
+                        image_grid,
+                        epoch,
+                        dataformats='NCHW'
+                    )
+                    
+                    # Log individual metrics for this image
+                    writer.add_scalar(
+                        f'Validation_SID/Image_PSNR_{ratio_name}/sample_{img_idx}',
+                        img_data['psnr'],
+                        epoch
+                    )
+                    writer.add_scalar(
+                        f'Validation_SID/Image_SSIM_{ratio_name}/sample_{img_idx}',
+                        img_data['ssim'],
+                        epoch
+                    )
 
         psnr_data = np.column_stack((psnr_data,
                                      [start_epoch-1, psnr_all[0], ssim_all[0], psnr_all[1], ssim_all[1],

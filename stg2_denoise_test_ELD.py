@@ -25,6 +25,8 @@ from dataset.sid_dataset import worker_init_fn
 from net.UNetSeeInDark import Net
 import util.util as util
 from data_process import *
+import rawpy
+from torch.utils.tensorboard import SummaryWriter
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
@@ -134,7 +136,7 @@ def read_wb_ccm(raw):
     if ccm[0,0] == 0:
         ccm = np.eye(3, dtype=np.float32)
     return wb, ccm
-def valid(args):
+def valid(args, writer=None, epoch=None):
     # torch.set_num_threads(4)
     # new or continue
     initial_epoch = findLastCheckpoint(save_dir=args.save_path, save_pre = args.save_prefix)
@@ -196,6 +198,11 @@ def valid(args):
         ssim_all = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], np.float32)
         img_ids_set = [[4, 9, 14], [5, 10, 15]]
         # res = engine.eval(dataloader, dataset_name='eld_eval_{}'.format(camera), correct=False, crop=False)
+        
+        # Track images for TensorBoard
+        images_to_log = []  # Store (noisy, denoised, clean) tuples
+        max_images_to_log = 6  # Log up to 6 images total
+        
         jj = 0
         for i, img_ids in enumerate(img_ids_set):
             eval_datasets = [datasets.ELDEvalDataset(databasedir, camera_suffix, scenes=scenes, img_ids=img_ids) for
@@ -260,7 +267,29 @@ def valid(args):
                     name = input_path.split('/')[-2] + "_" + input_path.split('/')[-1][:-4] + "_OurNM_"
                     raw = rawpy.imread(target_path)
                     wb, ccm = read_wb_ccm(raw)
-                    output = raw2rgb_rawpy(imgs_dn, wb=wb, ccm=SonyCCM)
+                    
+                    # Convert images to RGB for visualization
+                    # raw2rgb_rawpy expects CHW format (4 channels)
+                    noisy_tensor_chw = noisy[0].cpu().clamp(0., 1.).float()
+                    clean_tensor_chw = clean[0].cpu().clamp(0., 1.).float()
+                    imgs_dn_chw = imgs_dn[0].cpu().clamp(0., 1.).float()
+                    
+                    noisy_rgb = raw2rgb_rawpy(noisy_tensor_chw.numpy(), wb=wb, ccm=SonyCCM)
+                    output = raw2rgb_rawpy(imgs_dn_chw.numpy(), wb=wb, ccm=SonyCCM)
+                    clean_rgb = raw2rgb_rawpy(clean_tensor_chw.numpy(), wb=wb, ccm=SonyCCM)
+                    
+                    # Store images for TensorBoard logging
+                    if writer is not None and epoch is not None and len(images_to_log) < max_images_to_log:
+                        images_to_log.append({
+                            'noisy': noisy_rgb,
+                            'denoised': output,
+                            'clean': clean_rgb,
+                            'psnr': psnr,
+                            'ssim': ssim,
+                            'camera': camera,
+                            'img_ids': img_ids
+                        })
+                    
                     # print(output.shape)
                     save_path = "./OurNM_image/"
                     if not os.path.exists(save_path):
@@ -281,7 +310,56 @@ def valid(args):
                 psnr_all[jj+2] = psnr_val_alpha / count
                 ssim_all[jj] = ssim_val / count
                 ssim_all[jj+2] = ssim_val_alpha / count
+                
+                # Log validation metrics to TensorBoard
+                if writer is not None and epoch is not None:
+                    writer.add_scalar(f'Validation_ELD/PSNR_{camera}_set{i}', psnr_all[jj], epoch)
+                    writer.add_scalar(f'Validation_ELD/SSIM_{camera}_set{i}', ssim_all[jj], epoch)
+                    writer.add_scalar(f'Validation_ELD/PSNR_alpha_{camera}_set{i}', psnr_all[jj+2], epoch)
+                    writer.add_scalar(f'Validation_ELD/SSIM_alpha_{camera}_set{i}', ssim_all[jj+2], epoch)
+                
                 jj = jj + 1
+        
+        # Log images to TensorBoard
+        if writer is not None and epoch is not None:
+            for img_idx, img_data in enumerate(images_to_log):
+                # Convert BGR to RGB for TensorBoard (OpenCV uses BGR)
+                noisy_rgb = img_data['noisy'][:, :, ::-1]  # BGR to RGB
+                denoised_rgb = img_data['denoised'][:, :, ::-1]
+                clean_rgb = img_data['clean'][:, :, ::-1]
+                
+                # Normalize to [0, 1] for TensorBoard
+                noisy_rgb = noisy_rgb.astype(np.float32) / 255.0
+                denoised_rgb = denoised_rgb.astype(np.float32) / 255.0
+                clean_rgb = clean_rgb.astype(np.float32) / 255.0
+                
+                # Convert to HWC format and add batch dimension
+                noisy_tensor = torch.from_numpy(noisy_rgb).permute(2, 0, 1).unsqueeze(0)
+                denoised_tensor = torch.from_numpy(denoised_rgb).permute(2, 0, 1).unsqueeze(0)
+                clean_tensor = torch.from_numpy(clean_rgb).permute(2, 0, 1).unsqueeze(0)
+                
+                # Create a grid with noisy, denoised, and clean images
+                image_grid = torch.cat([noisy_tensor, denoised_tensor, clean_tensor], dim=0)
+                
+                camera_name = img_data['camera']
+                writer.add_images(
+                    f'Validation_ELD/Images_{camera_name}/sample_{img_idx}',
+                    image_grid,
+                    epoch,
+                    dataformats='NCHW'
+                )
+                
+                # Log individual metrics for this image
+                writer.add_scalar(
+                    f'Validation_ELD/Image_PSNR_{camera_name}/sample_{img_idx}',
+                    img_data['psnr'],
+                    epoch
+                )
+                writer.add_scalar(
+                    f'Validation_ELD/Image_SSIM_{camera_name}/sample_{img_idx}',
+                    img_data['ssim'],
+                    epoch
+                )
 
         psnr_data = np.column_stack((psnr_data,
                                      [start_epoch-1, psnr_all[0], ssim_all[0], psnr_all[1], ssim_all[1],

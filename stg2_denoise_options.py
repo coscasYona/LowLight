@@ -9,7 +9,8 @@ parser = argparse.ArgumentParser(description="DResTCN_Gray")
 
 parser.add_argument("--trainset_path", type=str, default='../dataset/denoising/sid_raw/Train_Paired_RGBG_p512_N4480_FPN', help="path to train set")
 parser.add_argument("--train_dir", type=str, default='../dataset/denoising/', help="path to train set")
-parser.add_argument("--eval_dir", type=str, default='../dataset/SID/Sony', help="path to train set")
+parser.add_argument("--eval_dir", type=str, default='../dataset/SID/Sony', help="path to eval set")
+parser.add_argument("--fuji_eval_dir", type=str, default=None, help="path to Fuji 2025 eval set")
 # parser.add_argument("--trainset_path", type=str, default="/share/data/cy/trainset_p50_s10_rgb.h5", help="path to train set")
 # parser.add_argument("--trainset_path", type=str, default="/share/data/cy/trainset_p120_s200_gray.h5", help="path to train set")
 # local
@@ -32,6 +33,16 @@ parser.add_argument("--train_list", type=str, default="./dataset/Sony_train.txt"
                     help="Paired filename list for SID RAW training")
 parser.add_argument("--use_sid_raw", action="store_true",
                     help="Use SID RAW directory structure (short/long)")
+parser.add_argument("--fuji_trainset_path", type=str, default=None,
+                    help="Path to Fuji 2025 training dataset root directory")
+parser.add_argument("--fuji_train_list", type=str, default=None,
+                    help="Paired filename list for Fuji 2025 RAW training")
+parser.add_argument("--fuji_val_list", type=str, default=None,
+                    help="Paired filename list for Fuji 2025 RAW validation")
+parser.add_argument("--fuji_test_list", type=str, default=None,
+                    help="Paired filename list for Fuji 2025 RAW testing")
+parser.add_argument("--use_fuji_raw", action="store_true",
+                    help="Use Fuji 2025 RAW directory structure (short/long)")
 parser.add_argument("--skip_eval", action="store_true",
                     help="Skip validation loops after each checkpoint save")
 # net

@@ -130,15 +130,16 @@ def crop_center(img,cropx,cropy):
 
 
 """tensorboard"""
-# from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
+import socket
 
 def get_summary_writer(log_dir):    
     if not os.path.exists(log_dir):
-        os.mkdir(log_dir)    
+        os.makedirs(log_dir, exist_ok=True)    
     log_dir = os.path.join(log_dir, datetime.now().strftime('%b%d_%H-%M-%S')+'_'+socket.gethostname())
     if not os.path.exists(log_dir):
-        os.mkdir(log_dir)
+        os.makedirs(log_dir, exist_ok=True)
     writer = SummaryWriter(log_dir)
     return writer
 
