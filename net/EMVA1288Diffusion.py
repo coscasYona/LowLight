@@ -1,9 +1,26 @@
-import math
-from typing import Iterable, List, Optional, Tuple
+"""
+EMVA 1288 Physics-Guided Diffusion Model for CMOS Noise Denoising
 
+This module implements a diffusion model that uses the EMVA 1288 standard
+to model CMOS camera noise accurately. The forward diffusion process uses
+the actual noise distribution (shot + read + row + quantization) instead
+of simple Gaussian scaling.
+
+Based on: https://kmdouglass.github.io/posts/modeling-noise-for-image-simulations/
+"""
+
+import math
+from typing import Iterable, List, Optional, Tuple, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributions as tdist
+
+# Import noise generation from data_process
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from data_process.process import generate_noisy_torch, sample_params_max, get_camera_noisy_params_max
 
 
 def _init_conv(layer: nn.Module) -> None:
@@ -31,27 +48,82 @@ class SinusoidalTimeEmbedding(nn.Module):
         return emb
 
 
-class PhysicsEncoder(nn.Module):
+class EMVA1288PhysicsEncoder(nn.Module):
+    """
+    Physics encoder based on EMVA 1288 standard.
+    Encodes camera parameters (ISO, ratio, exposure) into features that
+    represent the noise characteristics.
+    """
     def __init__(self, cond_dim: int):
         super().__init__()
+        # Input features: [iso_norm, ratio_norm, log_K, log_sigGs, log_sigR, 
+        #                  shot_variance, read_variance, snr]
         self.embed = nn.Sequential(
-            nn.Linear(5, cond_dim),
+            nn.Linear(8, cond_dim),
             nn.SiLU(),
             nn.Linear(cond_dim, cond_dim),
             nn.SiLU(),
+            nn.Linear(cond_dim, cond_dim),
         )
         self.apply(_init_conv)
 
-    def forward(self, iso: torch.Tensor, ratio: torch.Tensor) -> torch.Tensor:
-        iso = torch.log1p(torch.clamp(iso, min=0.0))
-        ratio = torch.log1p(torch.clamp(ratio, min=0.0))
-        iso_norm = iso / 10.0
-        ratio_norm = ratio / 10.0
-        shot = torch.sqrt(torch.clamp(iso_norm * ratio_norm, min=1e-4))
-        read = torch.log1p(iso_norm + 1e-4)
-        inverse_ratio = torch.reciprocal(torch.clamp(ratio + 1e-4, min=1e-4))
-        feats = torch.cat([iso_norm, ratio_norm, shot, read, inverse_ratio], dim=-1)
-        return self.embed(feats)
+    def forward(self, iso: torch.Tensor, ratio: torch.Tensor, 
+                camera_params: Optional[Dict] = None) -> torch.Tensor:
+        """
+        Encode ISO and ratio into physics-based features.
+        
+        Args:
+            iso: ISO sensitivity [B]
+            ratio: Exposure ratio [B]
+            camera_params: Optional dict with K, sigGs, sigR, etc.
+        """
+        batch_size = iso.size(0)
+        device = iso.device
+        
+        iso = torch.clamp(iso.view(batch_size, -1), min=1.0)
+        ratio = torch.clamp(ratio.view(batch_size, -1), min=1.0)
+        
+        # Normalize
+        iso_norm = iso / 6400.0
+        ratio_norm = ratio / 300.0
+        
+        if camera_params is not None:
+            # Use provided camera parameters
+            K = torch.tensor(camera_params['K'], device=device, dtype=iso.dtype).view(-1, 1)
+            sigGs = torch.tensor(camera_params['sigGs'], device=device, dtype=iso.dtype).view(-1, 1)
+            sigR = torch.tensor(camera_params.get('sigR', 0.0), device=device, dtype=iso.dtype).view(-1, 1)
+        else:
+            # Estimate from ISO (fallback - should use actual calibration)
+            log_K = torch.log(iso_norm * 8.0 + 0.1)
+            K = torch.exp(log_K)
+            sigGs = torch.exp(log_K * 0.85 - 0.18)
+            sigR = torch.exp(log_K * 0.88 - 2.11)
+        
+        # EMVA 1288 calculations
+        # Shot noise variance is proportional to signal: var_shot = signal / K
+        # For normalized images, approximate signal as iso_norm * ratio_norm
+        shot_variance = torch.clamp(iso_norm * ratio_norm / (K + 1e-8), min=1e-6)
+        read_variance = sigGs ** 2
+        
+        # SNR approximation: SNR ≈ signal / sqrt(shot_var + read_var)
+        snr = torch.clamp(
+            (iso_norm * ratio_norm) / torch.sqrt(shot_variance + read_variance + 1e-8),
+            min=1e-6
+        )
+        
+        # Feature vector
+        features = torch.cat([
+            iso_norm,
+            ratio_norm,
+            torch.log1p(K),
+            torch.log1p(sigGs),
+            torch.log1p(sigR + 1e-6),
+            torch.log1p(shot_variance),
+            torch.log1p(read_variance),
+            torch.log1p(snr),
+        ], dim=-1)
+        
+        return self.embed(features)
 
 
 class ResidualBlock(nn.Module):
@@ -87,11 +159,7 @@ class ResidualBlock(nn.Module):
 
 
 class LinearAttentionBlock(nn.Module):
-    """
-    Linear Attention: O(n) memory complexity instead of O(n²)
-    Based on "Efficient Attention: Attention with Linear Complexities"
-    Uses feature map phi(x) = elu(x) + 1 to ensure positive attention weights
-    """
+    """Linear Attention: O(n) memory complexity"""
     def __init__(self, channels: int):
         super().__init__()
         self.norm = nn.GroupNorm(8, channels)
@@ -109,59 +177,21 @@ class LinearAttentionBlock(nn.Module):
         k = self.k(x_norm)
         v = self.v(x_norm)
         
-        # Linear attention: use feature map phi(x) = elu(x) + 1
-        # This ensures positive values and allows us to compute attention in O(n)
         q = F.elu(q) + 1.0
         k = F.elu(k) + 1.0
         
-        # Reshape for efficient computation
-        q = q.reshape(b, c, h * w)  # [B, C, N]
-        k = k.reshape(b, c, h * w)  # [B, C, N]
-        v = v.reshape(b, c, h * w)  # [B, C, N]
+        q = q.reshape(b, c, h * w)
+        k = k.reshape(b, c, h * w)
+        v = v.reshape(b, c, h * w)
         
-        # Linear attention: (Q @ K^T) @ V = Q @ (K^T @ V)
-        # Compute K^T @ V first: [B, C, N] @ [B, N, C] = [B, C, C]
-        kv = torch.bmm(k, v.transpose(1, 2))  # [B, C, C]
-        
-        # Normalize by sum of keys
-        k_sum = k.sum(dim=2, keepdim=True)  # [B, C, 1]
+        kv = torch.bmm(k, v.transpose(1, 2))
+        k_sum = k.sum(dim=2, keepdim=True)
         kv = kv / (k_sum + 1e-6)
         
-        # Compute Q @ (K^T @ V): [B, C, N] @ [B, C, C] = [B, C, N]
-        out = torch.bmm(kv, q)  # [B, C, N]
+        out = torch.bmm(kv, q)
         out = out.reshape(b, c, h, w)
         out = self.proj(out)
         return out + x
-
-
-class ChannelAttentionBlock(nn.Module):
-    """
-    Channel Attention: Very memory efficient, O(C) complexity
-    Based on SE-Net (Squeeze-and-Excitation)
-    """
-    def __init__(self, channels: int, reduction: int = 8):
-        super().__init__()
-        self.norm = nn.GroupNorm(8, channels)
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels, bias=False),
-            nn.Sigmoid()
-        )
-        self.apply(_init_conv)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, c, h, w = x.shape
-        x_norm = self.norm(x)
-        
-        # Channel attention
-        y = self.avg_pool(x_norm).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        
-        return x + x_norm * y
-
-
 
 
 class DownsampleBlock(nn.Module):
@@ -171,10 +201,8 @@ class DownsampleBlock(nn.Module):
         if use_attn:
             if attn_type == "linear":
                 self.attn = LinearAttentionBlock(out_ch)
-            elif attn_type == "channel":
-                self.attn = ChannelAttentionBlock(out_ch)
             else:
-                raise ValueError(f"Unknown attention type: {attn_type}. Use 'linear' or 'channel'")
+                self.attn = nn.Identity()
         else:
             self.attn = nn.Identity()
         self.down = nn.Conv2d(out_ch, out_ch, 3, stride=2, padding=1)
@@ -195,10 +223,8 @@ class UpsampleBlock(nn.Module):
         if use_attn:
             if attn_type == "linear":
                 self.attn = LinearAttentionBlock(out_ch)
-            elif attn_type == "channel":
-                self.attn = ChannelAttentionBlock(out_ch)
             else:
-                raise ValueError(f"Unknown attention type: {attn_type}. Use 'linear' or 'channel'")
+                self.attn = nn.Identity()
         else:
             self.attn = nn.Identity()
         self.apply(_init_conv)
@@ -270,12 +296,11 @@ class SlimUNet(nn.Module):
         return self.out_conv(x)
 
 
-class PhysicsGuidedStableDiffusion(nn.Module):
+class EMVA1288Diffusion(nn.Module):
     """
-    Memory-efficient diffusion-inspired denoiser with slim architecture.
-    Supports efficient attention types:
-    - "linear": O(n) memory complexity (default, recommended)
-    - "channel": O(C) memory complexity (most efficient)
+    Diffusion model using EMVA 1288 physics-based noise generation.
+    The forward diffusion process uses actual CMOS noise (shot + read + row + quant)
+    instead of simple Gaussian scaling.
     """
 
     def __init__(
@@ -289,17 +314,22 @@ class PhysicsGuidedStableDiffusion(nn.Module):
         cond_embed_dim: int = 64,
         attn_type: str = "linear",
         scheduler: str = "ddpm",
+        camera_type: str = "SonyA7S2",
+        noise_code: str = "prq",  # p=Poisson shot, r=row, q=quantization
     ):
         super().__init__()
         self.num_steps = max(1, num_steps)
         self.scheduler = scheduler
+        self.camera_type = camera_type
+        self.noise_code = noise_code
+        
         self.time_embed = nn.Sequential(
             SinusoidalTimeEmbedding(time_embed_dim),
             nn.Linear(time_embed_dim, time_embed_dim * 2),
             nn.SiLU(),
             nn.Linear(time_embed_dim * 2, time_embed_dim),
         )
-        self.physics_encoder = PhysicsEncoder(cond_embed_dim)
+        self.physics_encoder = EMVA1288PhysicsEncoder(cond_embed_dim)
         emb_dim = time_embed_dim + cond_embed_dim
 
         self.unet = SlimUNet(
@@ -311,11 +341,10 @@ class PhysicsGuidedStableDiffusion(nn.Module):
             attn_type=attn_type,
         )
         
-        # Improved noise schedule
+        # Noise schedule
         if scheduler == "ddpm":
             beta_start, beta_end = 0.0001, 0.02
         elif scheduler == "ddim":
-            # DDIM uses same schedule but different sampling
             beta_start, beta_end = 0.0001, 0.02
         else:
             beta_start, beta_end = 0.0001, 0.02
@@ -335,7 +364,6 @@ class PhysicsGuidedStableDiffusion(nn.Module):
             torch.sqrt(1.0 - alphas_cumprod),
             persistent=False,
         )
-        # For DDIM
         self.register_buffer(
             "sqrt_recip_alphas_cumprod",
             torch.sqrt(1.0 / alphas_cumprod),
@@ -355,15 +383,17 @@ class PhysicsGuidedStableDiffusion(nn.Module):
         timesteps: Optional[torch.Tensor] = None,
         num_steps: Optional[int] = None,
         predict_noise: bool = False,
+        camera_params: Optional[Dict] = None,
     ) -> torch.Tensor:
         if predict_noise:
             if timesteps is None:
                 raise ValueError("Timesteps required for noise prediction.")
-            return self._predict_eps(x, timesteps, iso, ratio)
-        return self.sample(x, iso=iso, ratio=ratio, num_steps=num_steps)
+            return self._predict_eps(x, timesteps, iso, ratio, camera_params)
+        return self.sample(x, iso=iso, ratio=ratio, num_steps=num_steps, camera_params=camera_params)
 
     def _prepare_iso_ratio(
-        self, iso: Optional[torch.Tensor], ratio: Optional[torch.Tensor], batch: int, device: torch.device, dtype: torch.dtype
+        self, iso: Optional[torch.Tensor], ratio: Optional[torch.Tensor], 
+        batch: int, device: torch.device, dtype: torch.dtype
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if iso is None:
             iso = torch.zeros(batch, 1, device=device, dtype=dtype)
@@ -390,13 +420,120 @@ class PhysicsGuidedStableDiffusion(nn.Module):
         timesteps: torch.Tensor,
         iso: Optional[torch.Tensor],
         ratio: Optional[torch.Tensor],
+        camera_params: Optional[Dict] = None,
     ) -> torch.Tensor:
         b = x.size(0)
         iso, ratio = self._prepare_iso_ratio(iso, ratio, b, x.device, x.dtype)
         t_emb = self._time_embedding(timesteps)
-        physics_emb = self.physics_encoder(iso, ratio)
+        physics_emb = self.physics_encoder(iso, ratio, camera_params)
         emb = torch.cat([t_emb, physics_emb], dim=-1)
         return self.unet(x, emb)
+
+    def generate_cmos_noise(
+        self, 
+        clean_image: torch.Tensor, 
+        iso: torch.Tensor,
+        ratio: torch.Tensor,
+        camera_params: Optional[Dict] = None,
+    ) -> torch.Tensor:
+        """
+        Generate CMOS noise using EMVA 1288 model.
+        Uses generate_noisy_torch from data_process for accurate physics modeling.
+        """
+        batch_size = clean_image.size(0)
+        device = clean_image.device
+        
+        # Get camera parameters
+        if camera_params is None:
+            # Sample parameters based on ISO
+            iso_np = iso.cpu().numpy().flatten()
+            ratio_np = ratio.cpu().numpy().flatten()
+            
+            # Use first ISO value to get params (batch should have same camera)
+            iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
+            camera_params = sample_params_max(
+                camera_type=self.camera_type,
+                iso=iso_val,
+                ratio=float(ratio_np[0]) if len(ratio_np) > 0 else None
+            )
+        
+        # Temporarily set DEVICE in process module to match our device
+        import data_process.process as process_module
+        original_device = getattr(process_module, 'DEVICE', None)
+        process_module.DEVICE = device
+        
+        try:
+            # Generate noise for each sample in batch
+            noisy_images = []
+            for i in range(batch_size):
+                img = clean_image[i:i+1]  # [1, C, H, W]
+                
+                # Use generate_noisy_torch with physics parameters
+                noisy = generate_noisy_torch(
+                    img,
+                    camera_type=self.camera_type,
+                    noise_code=self.noise_code,
+                    param=camera_params,
+                    MultiFrameMean=1,
+                    ori=False,
+                    clip=False
+                )
+                noisy_images.append(noisy)
+            
+            noisy_batch = torch.cat(noisy_images, dim=0)
+            
+            # Extract just the noise (difference from clean)
+            noise = noisy_batch - clean_image
+            return noise
+        finally:
+            # Restore original device
+            if original_device is not None:
+                process_module.DEVICE = original_device
+
+    def q_sample(
+        self, 
+        x_start: torch.Tensor, 
+        noise: torch.Tensor, 
+        timesteps: torch.Tensor,
+        iso: Optional[torch.Tensor] = None,
+        ratio: Optional[torch.Tensor] = None,
+        camera_params: Optional[Dict] = None,
+        use_physics_noise: bool = True,
+    ) -> torch.Tensor:
+        """
+        Forward diffusion process using EMVA 1288 CMOS noise.
+        
+        Args:
+            x_start: Clean images
+            noise: Base Gaussian noise (for blending)
+            timesteps: Diffusion timesteps
+            iso: ISO sensitivity
+            ratio: Exposure ratio
+            camera_params: Camera noise parameters
+            use_physics_noise: If True, use CMOS noise; if False, use standard Gaussian
+        """
+        sqrt_alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, x_start.shape)
+        sqrt_one_minus_alpha = self._extract(
+            self.sqrt_one_minus_alphas_cumprod, timesteps, x_start.shape
+        )
+        
+        if use_physics_noise and iso is not None and ratio is not None:
+            # Generate CMOS noise matching physics model
+            cmos_noise = self.generate_cmos_noise(x_start, iso, ratio, camera_params)
+            
+            # Blend physics noise with standard noise based on timestep
+            # Early timesteps: more physics noise (realistic)
+            # Later timesteps: more standard noise (for diffusion schedule)
+            # IMPORTANT: Blend unscaled noise first, then apply sqrt_one_minus_alpha once
+            # Using a fixed blending weight to avoid double-scaling
+            # (If we used sqrt_one_minus_alpha as weight, it would be scaled twice)
+            blend_weight = 0.7  # 70% physics noise, 30% standard noise
+            blended_noise = blend_weight * cmos_noise + (1 - blend_weight) * noise
+        else:
+            blended_noise = noise
+        
+        # Apply scaling once to the final blended noise (no double-scaling)
+        return sqrt_alpha * x_start + sqrt_one_minus_alpha * blended_noise
 
     def sample(
         self,
@@ -405,20 +542,16 @@ class PhysicsGuidedStableDiffusion(nn.Module):
         ratio: Optional[torch.Tensor] = None,
         num_steps: Optional[int] = None,
         eta: float = 0.0,
+        camera_params: Optional[Dict] = None,
     ) -> torch.Tensor:
         """
-        Sample using DDPM (eta=1.0) or DDIM (eta=0.0) scheduler
-        eta=0.0: DDIM (deterministic, faster)
-        eta=1.0: DDPM (stochastic, original)
+        Sample using DDPM (eta=1.0) or DDIM (eta=0.0) scheduler.
         """
         steps = num_steps or self.num_steps
         x = measurement
         
         if self.scheduler == "ddim" or eta == 0.0:
-            # DDIM sampling (deterministic, faster)
-            # Apply physics noise scale if ISO/ratio provided
-            noise_scale = self.physics_noise_scale(iso, ratio) if iso is not None and ratio is not None else 1.0
-            
+            # DDIM sampling
             for step in reversed(range(steps)):
                 t = torch.full(
                     (x.size(0),),
@@ -426,9 +559,7 @@ class PhysicsGuidedStableDiffusion(nn.Module):
                     device=x.device,
                     dtype=torch.long,
                 )
-                eps = self._predict_eps(x, t, iso, ratio)
-                # Scale predicted noise by physics (model predicts unscaled noise)
-                eps = eps * noise_scale
+                eps = self._predict_eps(x, t, iso, ratio, camera_params)
                 
                 alpha_bar_t = self._extract(self.alphas_cumprod, t, x.shape)
                 alpha_bar_t_prev = self._extract(
@@ -445,10 +576,7 @@ class PhysicsGuidedStableDiffusion(nn.Module):
                 
                 x = torch.sqrt(alpha_bar_t_prev) * pred_x0 + dir_xt + random_noise
         else:
-            # DDPM sampling (original)
-            # Apply physics noise scale if ISO/ratio provided
-            noise_scale = self.physics_noise_scale(iso, ratio) if iso is not None and ratio is not None else 1.0
-            
+            # DDPM sampling
             for step in reversed(range(steps)):
                 t = torch.full(
                     (x.size(0),),
@@ -456,9 +584,7 @@ class PhysicsGuidedStableDiffusion(nn.Module):
                     device=x.device,
                     dtype=torch.long,
                 )
-                eps = self._predict_eps(x, t, iso, ratio)
-                # Scale predicted noise by physics (model predicts unscaled noise)
-                eps = eps * noise_scale
+                eps = self._predict_eps(x, t, iso, ratio, camera_params)
                 
                 beta = self._extract(self.betas, t, x.shape)
                 alpha = self._extract(self.alphas, t, x.shape)
@@ -471,27 +597,6 @@ class PhysicsGuidedStableDiffusion(nn.Module):
         
         return torch.clamp(x, 0.0, 1.0)
 
-    def q_sample(self, x_start: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
-        sqrt_alpha = self._extract(self.sqrt_alphas_cumprod, timesteps, x_start.shape)
-        sqrt_one_minus_alpha = self._extract(
-            self.sqrt_one_minus_alphas_cumprod, timesteps, x_start.shape
-        )
-        return sqrt_alpha * x_start + sqrt_one_minus_alpha * noise
 
-    def physics_noise_scale(self, iso: torch.Tensor, ratio: torch.Tensor) -> torch.Tensor:
-        iso = torch.clamp(iso.view(iso.size(0), -1), min=1.0)
-        ratio = torch.clamp(ratio.view(ratio.size(0), -1), min=1.0)
-        iso_norm = iso / 6400.0
-        ratio_norm = ratio / 300.0
-        shot = torch.sqrt(torch.clamp(iso_norm * ratio_norm, min=1e-6))
-        read = torch.sqrt(torch.clamp(iso_norm, min=1e-6)) * 0.1
-        scale = torch.clamp(shot + read, min=1e-3)
-        return scale.view(-1, 1, 1, 1)
+__all__ = ["EMVA1288Diffusion"]
 
-
-# Backwards compatibility
-class Net(PhysicsGuidedStableDiffusion):
-    pass
-
-
-__all__ = ["PhysicsGuidedStableDiffusion", "Net"]

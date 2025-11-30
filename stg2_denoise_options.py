@@ -59,6 +59,11 @@ parser.add_argument("--sd_scheduler", type=str, default="ddpm", choices=["ddpm",
                     help="Diffusion scheduler: ddpm (stochastic, original), ddim (deterministic, faster)")
 parser.add_argument("--use_gradient_checkpointing", action="store_true",
                     help="Enable gradient checkpointing to save memory (trades compute for memory)")
+# EMVA 1288 specific arguments
+parser.add_argument("--emva_camera_type", type=str, default="SonyA7S2",
+                    help="Camera type for EMVA 1288 noise model (e.g., SonyA7S2, IMX686, NikonD850)")
+parser.add_argument("--emva_noise_code", type=str, default="prq",
+                    help="Noise code: p=Poisson shot, r=row noise, q=quantization, g=Tukey-Lambda, d=bias")
 
 # save
 parser.add_argument("--last_ckpt",type=str,default="/dn_raw_DnCNN_syn_e47.pth",help="the ckpt of last net")

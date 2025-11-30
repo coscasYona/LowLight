@@ -66,6 +66,8 @@ def main():
     # Optuna args
     parser.add_argument('--n_trials', type=int, default=50, help='Number of trials')
     parser.add_argument('--study_name', type=str, default='denoise_optuna', help='Study name')
+    parser.add_argument('--storage', type=str, default=None, help='Storage URL (default: databases/optuna/production/{study_name}.db)')
+    parser.add_argument('--test', action='store_true', help='Use test database folder instead of production')
     parser.add_argument('--pruning', action='store_true', help='Enable pruning')
     
     # Training args (required)
@@ -118,8 +120,15 @@ def main():
         else:
             i += 1
     
-    # Create study
-    storage = f"sqlite:///{optuna_args.study_name}.db"
+    # Create study with organized database location
+    if optuna_args.storage:
+        storage = optuna_args.storage
+    else:
+        # Use organized folder structure
+        db_folder = 'databases/optuna/test' if optuna_args.test else 'databases/optuna/production'
+        os.makedirs(db_folder, exist_ok=True)
+        storage = f"sqlite:///{db_folder}/{optuna_args.study_name}.db"
+    
     try:
         study = optuna.create_study(
             study_name=optuna_args.study_name,

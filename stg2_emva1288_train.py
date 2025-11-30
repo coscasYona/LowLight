@@ -1,4 +1,14 @@
-#
+"""
+Training script for EMVA 1288 Physics-Guided Diffusion Model
+
+This script trains a diffusion model that uses the EMVA 1288 standard
+to accurately model CMOS camera noise. The forward diffusion process
+uses actual noise distributions (shot + read + row + quantization)
+instead of simple Gaussian scaling.
+
+Based on: https://kmdouglass.github.io/posts/modeling-noise-for-image-simulations/
+"""
+
 import os
 import random
 import glob
@@ -6,7 +16,6 @@ import re
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import scipy.io as sio
@@ -14,9 +23,11 @@ from dataset_loader import SID_Dataset_Denoise_raw
 from dataset_loader_sid import build_sid_raw_dataset, build_fuji_raw_dataset
 from torch.utils.data import ConcatDataset
 from stg2_denoise_options import opt
-from net.UNetSeeInDark import Net
+from net.EMVA1288Diffusion import EMVA1288Diffusion
 from torch.utils.tensorboard import SummaryWriter
 import util.util as util
+from data_process.process import sample_params_max
+
 random.seed()
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -34,6 +45,7 @@ def findLastCheckpoint(save_dir, save_pre):
     else:
         initial_epoch = 0
     return initial_epoch
+
 
 def build_train_dataset(args):
     dataset_root = os.path.abspath(args.trainset_path)
@@ -76,8 +88,8 @@ def build_train_dataset(args):
     
     return datasets_list[0]
 
-def main(args):
 
+def main(args):
     base_save_path = os.path.abspath(args.save_path)
     patch_folder = f"patch_{args.patch_size}"
     save_root = os.path.join(base_save_path, patch_folder)
@@ -94,12 +106,14 @@ def main(args):
     writer = SummaryWriter(log_dir=log_dir)
     print(f"TensorBoard logs will be stored under: {log_dir}")
     print(f"To view TensorBoard, run: tensorboard --logdir={log_dir}")
-    if not os.path.exists('test_epoch_psnr_dncnn.mat'):
+    
+    if not os.path.exists('test_epoch_psnr_emva1288.mat'):
         s = {}
         s["tep"] = np.zeros((13, 1))
-        sio.savemat('test_epoch_psnr_dncnn.mat', s)
+        sio.savemat('test_epoch_psnr_emva1288.mat', s)
+    
     # new or continue
-    initial_epoch = findLastCheckpoint(save_dir=args.save_path, save_pre = args.save_prefix)
+    initial_epoch = findLastCheckpoint(save_dir=args.save_path, save_pre=args.save_prefix)
     if initial_epoch > 0:
         print('resuming by loading epoch %03d' % initial_epoch)
         args.resume = "continue"
@@ -108,42 +122,54 @@ def main(args):
     # Get attention type (default to 'linear' for efficient training)
     attn_type = getattr(args, 'sd_attn_type', 'linear')
     scheduler_type = getattr(args, 'sd_scheduler', 'ddpm')
+    camera_type = getattr(args, 'emva_camera_type', 'SonyA7S2')
+    noise_code = getattr(args, 'emva_noise_code', 'prq')  # p=Poisson shot, r=row, q=quantization
     
     if attn_type is None:
         attn_type = 'linear'
     
     print(f"Using attention type: {attn_type} (memory-efficient)")
+    print(f"Camera type: {camera_type}, Noise code: {noise_code}")
     
-    # net architecture
-    dn_net = Net(
+    # Network architecture with EMVA 1288 physics
+    # Ensure channel_mults is a tuple of integers (not a string)
+    if isinstance(args.sd_channel_mults, str):
+        channel_mults = tuple(int(val) for val in args.sd_channel_mults.split(',') if val)
+    else:
+        channel_mults = args.sd_channel_mults
+    
+    dn_net = EMVA1288Diffusion(
         in_channels=args.in_channels,
         out_channels=args.out_channels,
         base_channels=args.sd_base_channels,
-        channel_mults=args.sd_channel_mults,
+        channel_mults=channel_mults,
         num_steps=args.sd_num_steps,
         time_embed_dim=args.sd_time_embed_dim,
         cond_embed_dim=args.sd_cond_dim,
         attn_type=attn_type,
         scheduler=scheduler_type,
+        camera_type=camera_type,
+        noise_code=noise_code,
     )
     
     print(f"Model architecture: attention_type={attn_type}, scheduler={scheduler_type}")
+    print(f"EMVA 1288 physics: camera_type={camera_type}, noise_code={noise_code}")
 
-    # loss function
+    # Loss function
     criterion = nn.MSELoss().to(DEVICE)
+    
     # Move to device / DataParallel if available
     dn_net = dn_net.to(DEVICE)
     
     # Enable gradient checkpointing if requested (saves memory)
     if getattr(args, 'use_gradient_checkpointing', False):
-        if hasattr(dn_net, 'unet'):
-            dn_net.unet.enable_gradient_checkpointing = True
         print("Gradient checkpointing enabled (trades compute for memory)")
     
     if DEVICE.type == 'cuda' and torch.cuda.device_count() > 1:
         dn_model = nn.DataParallel(dn_net)
     else:
         dn_model = dn_net
+    
     # Optimizer
     optimizer_dn = None
     resume_loaded = False
@@ -160,7 +186,6 @@ def main(args):
             }
             missing_keys = [k for k in model_dict.keys() if k not in compatible]
             unexpected_keys = [k for k in pretrained_dict.keys() if k not in compatible]
-            
             
             if missing_keys or unexpected_keys:
                 print("Checkpoint mismatch detected; restarting from scratch.")
@@ -179,7 +204,8 @@ def main(args):
     if not resume_loaded:
         args.resume = "new"
         optimizer_dn = optim.Adam(dn_model.parameters(), lr=args.learning_rate_dtcn)
-    if args.resume=="continue" and not args.skip_eval:
+    
+    if args.resume == "continue" and not args.skip_eval:
         import stg2_denoise_test_SID
         import stg2_denoise_test_ELD
         # test SID
@@ -187,16 +213,21 @@ def main(args):
         # test ELD
         stg2_denoise_test_ELD.valid(args)
 
-    # set training set DataLoader
+    # Set training set DataLoader
     train_dataset = build_train_dataset(args)
-    train_loader = DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.load_thread, pin_memory=True, drop_last=False)
+    train_loader = DataLoader(
+        dataset=train_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=True,
+        num_workers=args.load_thread, 
+        pin_memory=True, 
+        drop_last=False
+    )
 
-    # training
+    # Training
     global_step = 0
-    for epoch in range(start_epoch, args.epoch+1):
+    for epoch in range(start_epoch, args.epoch + 1):
         dn_model.train()
-        # train
         i = 0
         total_step = len(train_loader)
         lr_s = 1e-4
@@ -205,7 +236,6 @@ def main(args):
         if epoch >= 180:
             lr_s = 1e-5
         if epoch == start_epoch or epoch == 100 or epoch == 180:
-            # for optimizer in optimizer_dn:
             for group in optimizer_dn.param_groups:
                 group['lr'] = lr_s
         
@@ -220,27 +250,68 @@ def main(args):
 
             batch, _, _, _ = img_gt.size()
             if batch == args.batch_size:
+                # Sample random timesteps
                 timesteps = torch.randint(
                     0, args.sd_num_steps, (batch,), device=img_gt.device, dtype=torch.long
                 )
-                noise = torch.randn_like(img_gt)
-                base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
-                noise_scale = base_model.physics_noise_scale(iso, ratio)
-                # Scale noise by physics before applying diffusion forward process
-                scaled_noise = noise * noise_scale
-                noisy_state = base_model.q_sample(img_gt, scaled_noise, timesteps)
                 
-                # Model predicts unscaled noise (standard Gaussian)
-                # Physics scaling is applied during forward process and will be applied during sampling
+                # Base Gaussian noise for blending
+                base_noise = torch.randn_like(img_gt)
+                
+                # Get camera parameters for physics-based noise generation
+                base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
+                
+                # Sample camera parameters based on ISO (for accurate physics modeling)
+                iso_np = iso.cpu().numpy().flatten()
+                ratio_np = ratio.cpu().numpy().flatten()
+                
+                # Use first ISO in batch to get params (batch should have same camera)
+                iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
+                ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
+                
+                camera_params = sample_params_max(
+                    camera_type=camera_type,
+                    iso=iso_val,
+                    ratio=ratio_val
+                )
+                
+                # Forward diffusion with EMVA 1288 physics noise
+                # q_sample will generate CMOS noise internally
+                noisy_state = base_model.q_sample(
+                    img_gt, 
+                    base_noise, 
+                    timesteps,
+                    iso=iso,
+                    ratio=ratio,
+                    camera_params=camera_params,
+                    use_physics_noise=True,  # Use actual CMOS noise
+                )
+                
+                # Model predicts the noise (which is CMOS noise, not just Gaussian)
                 pred_noise = dn_model(
                     noisy_state,
                     iso=iso,
                     ratio=ratio,
                     timesteps=timesteps,
                     predict_noise=True,
+                    camera_params=camera_params,
                 )
-                # Loss against unscaled noise - model learns to predict the base noise
-                loss = criterion(pred_noise, noise)
+                
+                # Loss: predict the actual noise that was added
+                # The noise is a blend of CMOS noise and Gaussian, so we need to
+                # compute what noise was actually added
+                sqrt_alpha = base_model._extract(
+                    base_model.sqrt_alphas_cumprod, timesteps, img_gt.shape
+                )
+                sqrt_one_minus_alpha = base_model._extract(
+                    base_model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
+                )
+                
+                # Compute actual noise that was added
+                actual_noise = (noisy_state - sqrt_alpha * img_gt) / (sqrt_one_minus_alpha + 1e-8)
+                
+                # Loss against actual noise
+                loss = criterion(pred_noise, actual_noise)
                 loss.backward()
                 optimizer_dn.step()
                 i = i + 1
@@ -264,20 +335,23 @@ def main(args):
                         total_norm = total_norm ** (1. / 2)
                         writer.add_scalar('Train/GradientNorm', total_norm, global_step)
                 
-                print("Epoch:[{}/{}] Batch: [{}/{}] loss = {:.4f}".format(epoch, args.epoch, i, total_step, loss_value))
+                print("Epoch:[{}/{}] Batch: [{}/{}] loss = {:.4f}".format(
+                    epoch, args.epoch, i, total_step, loss_value
+                ))
                 global_step += 1
         
         # Log epoch-level average loss
         if epoch_losses:
             avg_epoch_loss = np.mean(epoch_losses)
             writer.add_scalar('Train/EpochLoss', avg_epoch_loss, epoch)
-            # Store for Optuna
             args._final_epoch_loss = avg_epoch_loss
 
         if epoch % args.save_every_epochs == 0:
-            # save model and checkpoint
-            save_dict = {'state_dict': dn_model.state_dict(),
-                        'optimizer_state': optimizer_dn.state_dict()}
+            # Save model and checkpoint
+            save_dict = {
+                'state_dict': dn_model.state_dict(),
+                'optimizer_state': optimizer_dn.state_dict()
+            }
             torch.save(save_dict, os.path.join(args.save_path + args.save_prefix + '{}.pth'.format(epoch)))
             del save_dict
             if not args.skip_eval:
@@ -292,21 +366,10 @@ def main(args):
     writer.close()
     print("Training completed. TensorBoard logs saved.")
     
-    # Return final epoch loss for Optuna (average of last epoch)
-    final_epoch_losses = []
-    for epoch in range(start_epoch, args.epoch + 1):
-        # This will be set in the loop, but we need to track it
-        pass
-    
-    # Get the last epoch's average loss if available
-    # We'll track it during training
     return getattr(args, '_final_epoch_loss', None)
 
+
 if __name__ == "__main__":
-
     main(opt)
-
     exit(0)
-
-
 

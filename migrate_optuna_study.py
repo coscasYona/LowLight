@@ -37,7 +37,9 @@ def main():
     parser.add_argument('--study_name', type=str, default='denoise_optimization',
                        help='Name of the study to check')
     parser.add_argument('--storage', type=str, default=None,
-                       help='Storage URL (default: sqlite:///{study_name}.db)')
+                       help='Storage URL (default: databases/optuna/production/{study_name}.db)')
+    parser.add_argument('--test', action='store_true',
+                       help='Use test database folder instead of production')
     parser.add_argument('--delete', action='store_true',
                        help='Delete the study if incompatible (use with caution!)')
     parser.add_argument('--list', action='store_true',
@@ -48,7 +50,11 @@ def main():
     if args.storage:
         storage = args.storage
     else:
-        storage = f"sqlite:///{args.study_name}.db"
+        # Use organized folder structure
+        import os
+        db_folder = 'databases/optuna/test' if args.test else 'databases/optuna/production'
+        os.makedirs(db_folder, exist_ok=True)
+        storage = f"sqlite:///{db_folder}/{args.study_name}.db"
     
     if args.list:
         # List all studies

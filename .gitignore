@@ -67,3 +67,8 @@ data/
 *.tmp
 *.temp
 
+# Optuna databases
+databases/optuna/test/
+*.db
+!databases/optuna/production/*.db
+
