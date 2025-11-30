@@ -1,0 +1,11 @@
+# Example Fuji 2025 training dataset list file
+# Format: short_image_path long_image_path
+# Paths can be relative to the dataset root directory or absolute
+# The dataset root should have 'short' and 'long' subdirectories similar to SID dataset
+
+short/00001_00_0.04s.RAF long/00001_00_10s.RAF
+short/00001_00_0.1s.RAF long/00001_00_10s.RAF
+short/00002_00_0.04s.RAF long/00002_00_10s.RAF
+short/00002_00_0.1s.RAF long/00002_00_10s.RAF
+# ... more pairs ...
+

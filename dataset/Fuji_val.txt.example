@@ -1,0 +1,7 @@
+# Example Fuji 2025 validation dataset list file
+# Format: short_image_path long_image_path
+
+short/00001_00_0.04s.RAF long/00001_00_10s.RAF
+short/00002_00_0.04s.RAF long/00002_00_10s.RAF
+# ... more pairs ...
+
