@@ -479,13 +479,18 @@ class PhysicsGuidedStableDiffusion(nn.Module):
         return sqrt_alpha * x_start + sqrt_one_minus_alpha * noise
 
     def physics_noise_scale(self, iso: torch.Tensor, ratio: torch.Tensor) -> torch.Tensor:
-        iso = torch.clamp(iso.view(iso.size(0), -1), min=1.0)
-        ratio = torch.clamp(ratio.view(ratio.size(0), -1), min=1.0)
+        # Validate and fix invalid values (NaN, Inf, negative, zero)
+        iso = torch.where(torch.isfinite(iso), iso, torch.ones_like(iso) * 6400.0)
+        ratio = torch.where(torch.isfinite(ratio), ratio, torch.ones_like(ratio) * 200.0)
+        iso = torch.clamp(iso.view(iso.size(0), -1), min=1.0, max=1e6)
+        ratio = torch.clamp(ratio.view(ratio.size(0), -1), min=1.0, max=1e6)
         iso_norm = iso / 6400.0
         ratio_norm = ratio / 300.0
         shot = torch.sqrt(torch.clamp(iso_norm * ratio_norm, min=1e-6))
         read = torch.sqrt(torch.clamp(iso_norm, min=1e-6)) * 0.1
         scale = torch.clamp(shot + read, min=1e-3)
+        # Final safety check for NaN/Inf
+        scale = torch.where(torch.isfinite(scale), scale, torch.ones_like(scale) * 1e-3)
         return scale.view(-1, 1, 1, 1)
 
 

@@ -241,6 +241,8 @@ def main(args):
         
         # Track epoch-level metrics
         epoch_losses = []
+        # Store last batch for image logging
+        last_batch_data = None
         
         for i, data in enumerate(train_loader, 0):
             img_gt = data['clean'].cuda()
@@ -249,102 +251,120 @@ def main(args):
             optimizer_dn.zero_grad()
 
             batch, _, _, _ = img_gt.size()
-            if batch == args.batch_size:
-                # Sample random timesteps
-                timesteps = torch.randint(
-                    0, args.sd_num_steps, (batch,), device=img_gt.device, dtype=torch.long
-                )
-                
-                # Base Gaussian noise for blending
-                base_noise = torch.randn_like(img_gt)
-                
-                # Get camera parameters for physics-based noise generation
-                base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
-                
-                # Sample camera parameters based on ISO (for accurate physics modeling)
-                iso_np = iso.cpu().numpy().flatten()
-                ratio_np = ratio.cpu().numpy().flatten()
-                
-                # Use first ISO in batch to get params (batch should have same camera)
-                iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
-                ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
-                
-                camera_params = sample_params_max(
-                    camera_type=camera_type,
-                    iso=iso_val,
-                    ratio=ratio_val
-                )
-                
-                # Forward diffusion with EMVA 1288 physics noise
-                # q_sample will generate CMOS noise internally
-                noisy_state = base_model.q_sample(
-                    img_gt, 
-                    base_noise, 
-                    timesteps,
-                    iso=iso,
-                    ratio=ratio,
-                    camera_params=camera_params,
-                    use_physics_noise=True,  # Use actual CMOS noise
-                )
-                
-                # Model predicts the noise (which is CMOS noise, not just Gaussian)
-                pred_noise = dn_model(
-                    noisy_state,
-                    iso=iso,
-                    ratio=ratio,
-                    timesteps=timesteps,
-                    predict_noise=True,
-                    camera_params=camera_params,
-                )
-                
-                # Loss: predict the actual noise that was added
-                # The noise is a blend of CMOS noise and Gaussian, so we need to
-                # compute what noise was actually added
-                sqrt_alpha = base_model._extract(
-                    base_model.sqrt_alphas_cumprod, timesteps, img_gt.shape
-                )
-                sqrt_one_minus_alpha = base_model._extract(
-                    base_model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
-                )
-                
-                # Compute actual noise that was added
-                actual_noise = (noisy_state - sqrt_alpha * img_gt) / (sqrt_one_minus_alpha + 1e-8)
-                
-                # Loss against actual noise
-                loss = criterion(pred_noise, actual_noise)
-                loss.backward()
-                optimizer_dn.step()
-                i = i + 1
-                
-                # Log training metrics to TensorBoard
-                loss_value = loss.item()
-                epoch_losses.append(loss_value)
-                writer.add_scalar('Train/Loss', loss_value, global_step)
-                writer.add_scalar('Train/LearningRate', lr_s, global_step)
-                
-                # Log gradient norms periodically
-                if global_step % 100 == 0:
-                    total_norm = 0
-                    param_count = 0
-                    for p in dn_model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                            param_count += 1
-                    if param_count > 0:
-                        total_norm = total_norm ** (1. / 2)
-                        writer.add_scalar('Train/GradientNorm', total_norm, global_step)
-                
-                print("Epoch:[{}/{}] Batch: [{}/{}] loss = {:.4f}".format(
-                    epoch, args.epoch, i, total_step, loss_value
-                ))
-                global_step += 1
+            # Sample random timesteps
+            timesteps = torch.randint(
+                0, args.sd_num_steps, (batch,), device=img_gt.device, dtype=torch.long
+            )
+            
+            # Base Gaussian noise for blending
+            base_noise = torch.randn_like(img_gt)
+            
+            # Get camera parameters for physics-based noise generation
+            base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
+            
+            # Sample camera parameters based on ISO (for accurate physics modeling)
+            iso_np = iso.cpu().numpy().flatten()
+            ratio_np = ratio.cpu().numpy().flatten()
+            
+            # Use first ISO in batch to get params (batch should have same camera)
+            iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
+            ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
+            
+            camera_params = sample_params_max(
+                camera_type=camera_type,
+                iso=iso_val,
+                ratio=ratio_val
+            )
+            
+            # Forward diffusion with EMVA 1288 physics noise
+            # q_sample will generate CMOS noise internally
+            noisy_state = base_model.q_sample(
+                img_gt, 
+                base_noise, 
+                timesteps,
+                iso=iso,
+                ratio=ratio,
+                camera_params=camera_params,
+                use_physics_noise=True,  # Use actual CMOS noise
+            )
+            
+            # Store last batch for image logging
+            if i == len(train_loader) - 1:
+                last_batch_data = {
+                    'img_gt': img_gt[:min(4, batch)].detach(),
+                    'noisy_state': noisy_state[:min(4, batch)].detach(),
+                    'iso': iso[:min(4, batch)],
+                    'ratio': ratio[:min(4, batch)],
+                    'camera_params': camera_params
+                }
+            
+            # Model predicts the noise (which is CMOS noise, not just Gaussian)
+            pred_noise = dn_model(
+                noisy_state,
+                iso=iso,
+                ratio=ratio,
+                timesteps=timesteps,
+                predict_noise=True,
+                camera_params=camera_params,
+            )
+            
+            # Loss: predict the actual noise that was added
+            # The noise is a blend of CMOS noise and Gaussian, so we need to
+            # compute what noise was actually added
+            sqrt_alpha = base_model._extract(
+                base_model.sqrt_alphas_cumprod, timesteps, img_gt.shape
+            )
+            sqrt_one_minus_alpha = base_model._extract(
+                base_model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
+            )
+            
+            # Compute actual noise that was added
+            actual_noise = (noisy_state - sqrt_alpha * img_gt) / (sqrt_one_minus_alpha + 1e-8)
+            
+            # Loss against actual noise
+            loss = criterion(pred_noise, actual_noise)
+            loss.backward()
+            optimizer_dn.step()
+            i = i + 1
+            
+            # Log training metrics to TensorBoard
+            loss_value = loss.item()
+            epoch_losses.append(loss_value)
+            writer.add_scalar('Train/Loss', loss_value, global_step)
+            writer.add_scalar('Train/LearningRate', lr_s, global_step)
+            
+            # Log gradient norms periodically
+            if global_step % 100 == 0:
+                total_norm = 0
+                param_count = 0
+                for p in dn_model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                        param_count += 1
+                if param_count > 0:
+                    total_norm = total_norm ** (1. / 2)
+                    writer.add_scalar('Train/GradientNorm', total_norm, global_step)
+            
+            print("Epoch:[{}/{}] Batch: [{}/{}] loss = {:.4f}".format(
+                epoch, args.epoch, i, total_step, loss_value
+            ))
+            global_step += 1
         
         # Log epoch-level average loss
         if epoch_losses:
             avg_epoch_loss = np.mean(epoch_losses)
             writer.add_scalar('Train/EpochLoss', avg_epoch_loss, epoch)
             args._final_epoch_loss = avg_epoch_loss
+
+        # Log image artifacts at end of each epoch
+        if last_batch_data is not None:
+            util.log_training_images(
+                writer=writer,
+                epoch=epoch,
+                model=dn_model,
+                image_data=last_batch_data
+            )
 
         if epoch % args.save_every_epochs == 0:
             # Save model and checkpoint

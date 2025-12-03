@@ -180,6 +180,109 @@ def write_loss(writer, prefix, avg_meters, iteration):
         writer.add_scalar(
             os.path.join(prefix, key), meter, iteration)
 
+
+def log_training_images(writer, epoch, model, image_data):
+    """
+    Log training images to TensorBoard.
+    
+    Args:
+        writer: TensorBoard SummaryWriter
+        epoch: Current epoch number
+        model: Model to use for denoising (will be set to eval mode)
+        image_data: Dict containing:
+            - 'img_gt': Ground truth images [B, C, H, W]
+            - 'noisy_state': Noisy input images [B, C, H, W]
+            - 'iso': ISO values [B]
+            - 'ratio': Ratio values [B]
+            - 'camera_params': (optional) Camera parameters dict for EMVA1288
+            - 'num_steps': (optional) Number of sampling steps, default 50
+            - 'eta': (optional) Sampling eta, default 0.0
+    """
+    if image_data is None:
+        return
+    
+    import torch
+    
+    model.eval()
+    with torch.no_grad():
+        base_model = model.module if hasattr(model, 'module') else model
+        
+        # Get sampling parameters
+        num_steps = image_data.get('num_steps', 50)
+        eta = image_data.get('eta', 0.0)
+        camera_params = image_data.get('camera_params', None)
+        
+        # Validate and fix iso/ratio values before sampling
+        iso = image_data['iso']
+        ratio = image_data['ratio']
+        
+        # Replace NaN/Inf with safe defaults
+        iso = torch.where(torch.isfinite(iso), iso, torch.ones_like(iso) * 6400.0)
+        ratio = torch.where(torch.isfinite(ratio), ratio, torch.ones_like(ratio) * 200.0)
+        # Clamp to valid ranges
+        iso = torch.clamp(iso, min=1.0, max=1e6)
+        ratio = torch.clamp(ratio, min=1.0, max=1e6)
+        
+        # Generate denoised images
+        sample_kwargs = {
+            'iso': iso,
+            'ratio': ratio,
+            'num_steps': num_steps,
+            'eta': eta
+        }
+        if camera_params is not None:
+            sample_kwargs['camera_params'] = camera_params
+        
+        denoised = base_model.sample(
+            image_data['noisy_state'],
+            **sample_kwargs
+        )
+        
+        # Normalize to [0, 1] for visualization (handle both [-1,1] and [0,1] ranges)
+        img_gt = image_data['img_gt']
+        noisy_state = image_data['noisy_state']
+        
+        img_gt_min = img_gt.min()
+        if img_gt_min < 0:
+            img_gt_norm = torch.clamp((img_gt + 1.0) / 2.0, 0.0, 1.0)
+        else:
+            img_gt_norm = torch.clamp(img_gt, 0.0, 1.0)
+        
+        noisy_min = noisy_state.min()
+        if noisy_min < 0:
+            noisy_norm = torch.clamp((noisy_state + 1.0) / 2.0, 0.0, 1.0)
+        else:
+            noisy_norm = torch.clamp(noisy_state, 0.0, 1.0)
+        
+        denoised_norm = torch.clamp(denoised, 0.0, 1.0)
+        
+        # Convert 4-channel RAW (RGGB) to 3-channel RGB for visualization
+        # RGGB format: [R, G1, B, G2] -> RGB: [R, (G1+G2)/2, B]
+        def raw_to_rgb(raw_4ch):
+            if raw_4ch.dim() == 3:
+                raw_4ch = raw_4ch.unsqueeze(0)
+            B, C, H, W = raw_4ch.shape
+            if C == 4:
+                R = raw_4ch[:, 0:1, :, :]
+                G1 = raw_4ch[:, 1:2, :, :]
+                B_ch = raw_4ch[:, 2:3, :, :]
+                G2 = raw_4ch[:, 3:4, :, :]
+                G = (G1 + G2) / 2.0
+                rgb = torch.cat([R, G, B_ch], dim=1)
+            else:
+                rgb = raw_4ch
+            return rgb.squeeze(0) if rgb.shape[0] == 1 else rgb
+        
+        img_gt_rgb = raw_to_rgb(img_gt_norm)
+        noisy_rgb = raw_to_rgb(noisy_norm)
+        denoised_rgb = raw_to_rgb(denoised_norm)
+        
+        # Create grid: [clean, noisy, denoised] for each sample
+        image_grid = torch.cat([img_gt_rgb, noisy_rgb, denoised_rgb], dim=0)
+        writer.add_images('Train/Images', image_grid, epoch, dataformats='NCHW')
+    
+    model.train()
+
 """progress bar"""
 import socket
 #aaa = '--name sid-ours-sonya7s2 --stage_in raw --stage_out raw --include 4'

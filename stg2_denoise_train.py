@@ -17,6 +17,8 @@ from stg2_denoise_options import opt
 from net.UNetSeeInDark import Net
 from torch.utils.tensorboard import SummaryWriter
 import util.util as util
+import time
+
 random.seed()
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -211,61 +213,75 @@ def main(args):
         
         # Track epoch-level metrics
         epoch_losses = []
+        # Store last batch for image logging
+        last_batch_data = None
         
         for i, data in enumerate(train_loader, 0):
             img_gt = data['clean'].cuda()
             ratio = data['ratio'].cuda()
             iso = data['ISO'].cuda()
+            gpu_start = time.time()
+
             optimizer_dn.zero_grad()
 
             batch, _, _, _ = img_gt.size()
-            if batch == args.batch_size:
-                timesteps = torch.randint(
-                    0, args.sd_num_steps, (batch,), device=img_gt.device, dtype=torch.long
-                )
-                noise = torch.randn_like(img_gt)
-                base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
-                noise_scale = base_model.physics_noise_scale(iso, ratio)
-                # Scale noise by physics before applying diffusion forward process
-                scaled_noise = noise * noise_scale
-                noisy_state = base_model.q_sample(img_gt, scaled_noise, timesteps)
-                
-                # Model predicts unscaled noise (standard Gaussian)
-                # Physics scaling is applied during forward process and will be applied during sampling
-                pred_noise = dn_model(
-                    noisy_state,
-                    iso=iso,
-                    ratio=ratio,
-                    timesteps=timesteps,
-                    predict_noise=True,
-                )
-                # Loss against unscaled noise - model learns to predict the base noise
-                loss = criterion(pred_noise, noise)
-                loss.backward()
-                optimizer_dn.step()
-                i = i + 1
-                
-                # Log training metrics to TensorBoard
-                loss_value = loss.item()
-                epoch_losses.append(loss_value)
-                writer.add_scalar('Train/Loss', loss_value, global_step)
-                writer.add_scalar('Train/LearningRate', lr_s, global_step)
-                
-                # Log gradient norms periodically
-                if global_step % 100 == 0:
-                    total_norm = 0
-                    param_count = 0
-                    for p in dn_model.parameters():
-                        if p.grad is not None:
-                            param_norm = p.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                            param_count += 1
-                    if param_count > 0:
-                        total_norm = total_norm ** (1. / 2)
-                        writer.add_scalar('Train/GradientNorm', total_norm, global_step)
-                
-                print("Epoch:[{}/{}] Batch: [{}/{}] loss = {:.4f}".format(epoch, args.epoch, i, total_step, loss_value))
-                global_step += 1
+            timesteps = torch.randint(
+                0, args.sd_num_steps, (batch,), device=img_gt.device, dtype=torch.long
+            )
+            noise = torch.randn_like(img_gt)
+            base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
+            noise_scale = base_model.physics_noise_scale(iso, ratio)
+            # Scale noise by physics before applying diffusion forward process
+            scaled_noise = noise * noise_scale
+            noisy_state = base_model.q_sample(img_gt, scaled_noise, timesteps)
+            
+            # Store last batch for image logging
+            if i == len(train_loader) - 1:
+                last_batch_data = {
+                    'img_gt': img_gt[:min(4, batch)].detach(),
+                    'noisy_state': noisy_state[:min(4, batch)].detach(),
+                    'iso': iso[:min(4, batch)],
+                    'ratio': ratio[:min(4, batch)]
+                }
+            
+            # Model predicts unscaled noise (standard Gaussian)
+            # Physics scaling is applied during forward process and will be applied during sampling
+            pred_noise = dn_model(
+                noisy_state,
+                iso=iso,
+                ratio=ratio,
+                timesteps=timesteps,
+                predict_noise=True,
+            )
+            # Loss against unscaled noise - model learns to predict the base noise
+            loss = criterion(pred_noise, noise)
+            loss.backward()
+            optimizer_dn.step()
+            gpu_end = time.time()
+            print(f"GPU time: {gpu_end - gpu_start} seconds")
+            i = i + 1
+            
+            # Log training metrics to TensorBoard
+            loss_value = loss.item()
+            epoch_losses.append(loss_value)
+            writer.add_scalar('Train/Loss', loss_value, global_step)
+            writer.add_scalar('Train/LearningRate', lr_s, global_step)
+            
+            # Log gradient norms periodically
+            if global_step % 100 == 0:
+                total_norm = 0
+                param_count = 0
+                for p in dn_model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                        param_count += 1
+                if param_count > 0:
+                    total_norm = total_norm ** (1. / 2)
+                    writer.add_scalar('Train/GradientNorm', total_norm, global_step)
+            
+            print("Epoch:[{}/{}] Batch: [{}/{}] loss = {:.4f} GPU time: {:.4f} seconds".format(epoch, args.epoch, i, total_step, loss_value, gpu_end - gpu_start))
+            global_step += 1
         
         # Log epoch-level average loss
         if epoch_losses:
@@ -273,6 +289,15 @@ def main(args):
             writer.add_scalar('Train/EpochLoss', avg_epoch_loss, epoch)
             # Store for Optuna
             args._final_epoch_loss = avg_epoch_loss
+
+        # Log image artifacts at end of each epoch
+        if last_batch_data is not None:
+            util.log_training_images(
+                writer=writer,
+                epoch=epoch,
+                model=dn_model,
+                image_data=last_batch_data
+            )
 
         if epoch % args.save_every_epochs == 0:
             # save model and checkpoint

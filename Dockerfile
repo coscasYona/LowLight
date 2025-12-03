@@ -1,5 +1,5 @@
-# Use NVIDIA PyTorch container as base
-FROM nvcr.io/nvidia/pytorch:24.01-py3
+# Use NVIDIA PyTorch container as base (supports RTX 5090 sm_120 and RTX 3090 sm_86)
+FROM nvcr.io/nvidia/pytorch:25.09-py3
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
