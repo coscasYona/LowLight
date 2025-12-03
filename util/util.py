@@ -207,8 +207,12 @@ def log_training_images(writer, epoch, model, image_data):
     with torch.no_grad():
         base_model = model.module if hasattr(model, 'module') else model
         
-        # Get sampling parameters
-        num_steps = image_data.get('num_steps', 50)
+        # Get sampling parameters - use model's num_steps as default to avoid index out of bounds
+        default_num_steps = base_model.num_steps if hasattr(base_model, 'num_steps') else 50
+        num_steps = image_data.get('num_steps', default_num_steps)
+        # Ensure num_steps doesn't exceed model's capacity
+        if hasattr(base_model, 'num_steps'):
+            num_steps = min(num_steps, base_model.num_steps)
         eta = image_data.get('eta', 0.0)
         camera_params = image_data.get('camera_params', None)
         

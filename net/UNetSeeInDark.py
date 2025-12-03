@@ -376,6 +376,9 @@ class PhysicsGuidedStableDiffusion(nn.Module):
         return iso, ratio
 
     def _extract(self, tensor: torch.Tensor, timesteps: torch.Tensor, shape: torch.Size) -> torch.Tensor:
+        # Clamp timesteps to valid range to prevent index out of bounds
+        max_idx = tensor.size(0) - 1
+        timesteps = torch.clamp(timesteps, min=0, max=max_idx)
         out = tensor.to(timesteps.device)[timesteps]
         return out.view(-1, *([1] * (len(shape) - 1)))
 
@@ -412,6 +415,8 @@ class PhysicsGuidedStableDiffusion(nn.Module):
         eta=1.0: DDPM (stochastic, original)
         """
         steps = num_steps or self.num_steps
+        # Clamp steps to not exceed model's num_steps to avoid index out of bounds
+        steps = min(steps, self.num_steps)
         x = measurement
         
         if self.scheduler == "ddim" or eta == 0.0:
