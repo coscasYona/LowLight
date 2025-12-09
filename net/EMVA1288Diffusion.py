@@ -89,9 +89,10 @@ class EMVA1288PhysicsEncoder(nn.Module):
         
         if camera_params is not None:
             # Use provided camera parameters
-            K = torch.tensor(camera_params['K'], device=device, dtype=iso.dtype).view(-1, 1)
-            sigGs = torch.tensor(camera_params['sigGs'], device=device, dtype=iso.dtype).view(-1, 1)
-            sigR = torch.tensor(camera_params.get('sigR', 0.0), device=device, dtype=iso.dtype).view(-1, 1)
+            # Expand scalars to match batch size
+            K = torch.tensor(camera_params['K'], device=device, dtype=iso.dtype).expand(batch_size, 1)
+            sigGs = torch.tensor(camera_params['sigGs'], device=device, dtype=iso.dtype).expand(batch_size, 1)
+            sigR = torch.tensor(camera_params.get('sigR', 0.0), device=device, dtype=iso.dtype).expand(batch_size, 1)
         else:
             # Estimate from ISO (fallback - should use actual calibration)
             log_K = torch.log(iso_norm * 8.0 + 0.1)
@@ -484,6 +485,17 @@ class EMVA1288Diffusion(nn.Module):
             
             # Extract just the noise (difference from clean)
             noise = noisy_batch - clean_image
+            
+            # Check for NaN/inf and replace with zeros
+            noise = torch.where(
+                torch.isfinite(noise),
+                noise,
+                torch.zeros_like(noise)
+            )
+            
+            # Clamp noise to reasonable range to prevent extreme values
+            noise = torch.clamp(noise, min=-10.0, max=10.0)
+            
             return noise
         finally:
             # Restore original device
@@ -521,6 +533,13 @@ class EMVA1288Diffusion(nn.Module):
             # Generate CMOS noise matching physics model
             cmos_noise = self.generate_cmos_noise(x_start, iso, ratio, camera_params)
             
+            # Check for NaN/inf in base noise and replace with zeros
+            noise = torch.where(
+                torch.isfinite(noise),
+                noise,
+                torch.zeros_like(noise)
+            )
+            
             # Blend physics noise with standard noise based on timestep
             # Early timesteps: more physics noise (realistic)
             # Later timesteps: more standard noise (for diffusion schedule)
@@ -530,10 +549,28 @@ class EMVA1288Diffusion(nn.Module):
             blend_weight = 0.7  # 70% physics noise, 30% standard noise
             blended_noise = blend_weight * cmos_noise + (1 - blend_weight) * noise
         else:
+            # Check for NaN/inf in base noise and replace with zeros
+            noise = torch.where(
+                torch.isfinite(noise),
+                noise,
+                torch.zeros_like(noise)
+            )
             blended_noise = noise
         
+        # Clamp sqrt_one_minus_alpha to avoid numerical issues
+        sqrt_one_minus_alpha = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
+        
         # Apply scaling once to the final blended noise (no double-scaling)
-        return sqrt_alpha * x_start + sqrt_one_minus_alpha * blended_noise
+        result = sqrt_alpha * x_start + sqrt_one_minus_alpha * blended_noise
+        
+        # Final check for NaN/inf in result
+        result = torch.where(
+            torch.isfinite(result),
+            result,
+            x_start  # Fallback to clean image if NaN/inf
+        )
+        
+        return result
 
     def sample(
         self,

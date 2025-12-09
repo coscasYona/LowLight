@@ -21,8 +21,8 @@ This project includes Docker configuration for easy deployment and training.
 2. **Run training:**
    ```bash
    docker-compose run --rm stg2-train python stg2_denoise_train.py \
-     --trainset_path /workspace/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-     --train_list /workspace/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+     --trainset_path /workspace/data/SID/Sony \
+     --train_list /workspace/data/SID/Sony_train_list.txt \
      --use_sid_raw \
      --skip_eval \
      --epoch 500 \

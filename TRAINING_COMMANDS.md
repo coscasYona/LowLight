@@ -4,8 +4,8 @@
 
 ```bash
 python stg2_denoise_train.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --sd_attn_type linear \
     --sd_scheduler ddim \
@@ -25,8 +25,8 @@ python stg2_denoise_train.py \
 
 ```bash
 python stg2_denoise_train.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --sd_attn_type channel \
     --sd_scheduler ddim \
@@ -47,10 +47,10 @@ python stg2_denoise_train.py \
 
 ```bash
 python stg2_denoise_train.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
-    --eval_dir /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
+    --eval_dir /workspace/data/SID/Sony \
     --sd_attn_type linear \
     --sd_scheduler ddim \
     --epoch 500 \
@@ -73,11 +73,11 @@ python stg2_denoise_train.py \
 
 ```bash
 python stg2_denoise_train.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
-    --fuji_trainset_path /path/to/fuji/dataset \
-    --fuji_train_list /path/to/fuji_train.txt \
+    --fuji_trainset_path /workspace/data/SID/Fuji \
+    --fuji_train_list /workspace/data/SID/Fuji_train_list.txt \
     --use_fuji_raw \
     --sd_attn_type linear \
     --sd_scheduler ddim \
@@ -97,8 +97,8 @@ python stg2_denoise_train.py \
 
 ```bash
 python stg2_denoise_train.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --sd_attn_type linear \
     --epoch 500 \

@@ -318,11 +318,39 @@ def main(args):
                 base_model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
             )
             
+            # Clamp sqrt_one_minus_alpha to avoid division by very small numbers
+            # This prevents numerical instability when timesteps are close to 0
+            sqrt_one_minus_alpha = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
+            
             # Compute actual noise that was added
-            actual_noise = (noisy_state - sqrt_alpha * img_gt) / (sqrt_one_minus_alpha + 1e-8)
+            actual_noise = (noisy_state - sqrt_alpha * img_gt) / sqrt_one_minus_alpha
+            
+            # Check for NaN/inf in actual_noise and replace with zeros
+            actual_noise = torch.where(
+                torch.isfinite(actual_noise),
+                actual_noise,
+                torch.zeros_like(actual_noise)
+            )
+            
+            # Clamp actual_noise to reasonable range to prevent extreme values
+            actual_noise = torch.clamp(actual_noise, min=-10.0, max=10.0)
+            
+            # Check for NaN/inf in pred_noise and replace with zeros
+            pred_noise = torch.where(
+                torch.isfinite(pred_noise),
+                pred_noise,
+                torch.zeros_like(pred_noise)
+            )
             
             # Loss against actual noise
             loss = criterion(pred_noise, actual_noise)
+            
+            # Check if loss is NaN/inf and skip this batch if so
+            if not torch.isfinite(loss):
+                print(f"Warning: NaN/inf loss detected at batch {i+1}, skipping...")
+                global_step += 1  # Still increment global_step to maintain consistency
+                continue
+            
             loss.backward()
             optimizer_dn.step()
             i = i + 1
@@ -363,7 +391,8 @@ def main(args):
                 writer=writer,
                 epoch=epoch,
                 model=dn_model,
-                image_data=last_batch_data
+                image_data=last_batch_data,
+                save_path=args.save_path
             )
 
         if epoch % args.save_every_epochs == 0:

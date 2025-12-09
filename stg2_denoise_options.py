@@ -77,6 +77,9 @@ parser.add_argument("--learning_rate_dtcn", type=float, default=1e-4, help="the 
 parser.add_argument("--decay_rate", type=float, default=0.5, help="the decay rate of lr rate")
 parser.add_argument("--epoch", type=int, default=200, help="number of epochs the model needs to run")
 parser.add_argument("--steps", type=str, default="100,180", help="schedule steps,use comma(,) between numbers")
+parser.add_argument("--loss_scale", type=float, default=10.0, help="Loss scaling factor to increase gradient strength (default: 10.0)")
+parser.add_argument("--use_grad_clip", action="store_true", help="Enable gradient clipping to stabilize training")
+parser.add_argument("--grad_clip_max", type=float, default=1.0, help="Maximum gradient norm for clipping (default: 1.0)")
 
 parser.add_argument("--save_path", type=str, default='./denoise_last_ckpt/',help="prefix added to all ckpt to be saved")
 

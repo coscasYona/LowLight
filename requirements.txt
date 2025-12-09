@@ -5,6 +5,7 @@ torchvision>=0.15.0
 # Scientific computing
 numpy==1.26.4
 scipy>=1.11.0
+h5py>=3.9.0
 
 # Image processing
 rawpy>=0.20.0

@@ -25,14 +25,24 @@ The `EMVA1288Diffusion` network and `stg2_emva1288_train.py` training script imp
 
 ```bash
 python stg2_emva1288_train.py \
-    --trainset_path /path/to/train/data \
-    --train_list ./dataset/Sony_train.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --emva_camera_type SonyA7S2 \
     --emva_noise_code prq \
-    --batch_size 4 \
-    --epoch 200 \
-    --save_path ./checkpoints/emva1288/
+    --sd_attn_type channel \
+    --sd_scheduler ddim \
+    --use_gradient_checkpointing \
+    --epoch 500 \
+    --batch_size 28 \
+    --load_thread 8 \
+    --patch_size 512 \
+    --sd_base_channels 16 \
+    --sd_channel_mults 1,2 \
+    --save_path ./runs/emva1288_try/ \
+    --save_prefix emva1288_epoch_ \
+    --resume new \
+    --skip_eval
 ```
 
 ### Arguments

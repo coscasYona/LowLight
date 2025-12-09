@@ -6,8 +6,8 @@
 
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --n_trials 50 \
     --n_epochs_per_trial 10 \
@@ -20,11 +20,11 @@ python stg2_denoise_optuna.py \
 
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
-    --fuji_trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Fuji2025 \
-    --fuji_train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Fuji2025/Fuji_train_list.txt \
+    --fuji_trainset_path /workspace/data/SID/Fuji \
+    --fuji_train_list /workspace/data/SID/Fuji_train_list.txt \
     --use_fuji_raw \
     --n_trials 50 \
     --n_epochs_per_trial 10 \
@@ -37,8 +37,8 @@ python stg2_denoise_optuna.py \
 
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --n_trials 100 \
     --n_epochs_per_trial 20 \
@@ -55,8 +55,8 @@ python stg2_denoise_optuna.py \
 
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --n_trials 1 \
     --n_epochs_per_trial 1 \
@@ -68,8 +68,8 @@ python stg2_denoise_optuna.py \
 
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --n_trials 50 \
     --n_epochs_per_trial 10 \
@@ -108,8 +108,8 @@ python stg2_denoise_optuna.py \
 ### 1. Quick Exploration (10 trials, 5 epochs each)
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --n_trials 10 \
     --n_epochs_per_trial 5 \
@@ -121,8 +121,8 @@ python stg2_denoise_optuna.py \
 ### 2. Full Optimization (100 trials, 20 epochs each)
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --n_trials 100 \
     --n_epochs_per_trial 20 \
@@ -134,8 +134,8 @@ python stg2_denoise_optuna.py \
 ### 3. Memory-Efficient (Channel Attention)
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --n_trials 50 \
     --n_epochs_per_trial 10 \

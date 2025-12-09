@@ -181,9 +181,9 @@ def write_loss(writer, prefix, avg_meters, iteration):
             os.path.join(prefix, key), meter, iteration)
 
 
-def log_training_images(writer, epoch, model, image_data):
+def log_training_images(writer, epoch, model, image_data, save_path=None):
     """
-    Log training images to TensorBoard.
+    Log training images to TensorBoard and optionally save to disk.
     
     Args:
         writer: TensorBoard SummaryWriter
@@ -197,6 +197,7 @@ def log_training_images(writer, epoch, model, image_data):
             - 'camera_params': (optional) Camera parameters dict for EMVA1288
             - 'num_steps': (optional) Number of sampling steps, default 50
             - 'eta': (optional) Sampling eta, default 0.0
+        save_path: (optional) Base path to save images. Images will be saved to {save_path}/images/
     """
     if image_data is None:
         return
@@ -281,9 +282,46 @@ def log_training_images(writer, epoch, model, image_data):
         noisy_rgb = raw_to_rgb(noisy_norm)
         denoised_rgb = raw_to_rgb(denoised_norm)
         
-        # Create grid: [clean, noisy, denoised] for each sample
-        image_grid = torch.cat([img_gt_rgb, noisy_rgb, denoised_rgb], dim=0)
+        # Ensure all tensors have batch dimension for consistent concatenation
+        if img_gt_rgb.dim() == 3:
+            img_gt_rgb = img_gt_rgb.unsqueeze(0)
+        if noisy_rgb.dim() == 3:
+            noisy_rgb = noisy_rgb.unsqueeze(0)
+        if denoised_rgb.dim() == 3:
+            denoised_rgb = denoised_rgb.unsqueeze(0)
+        
+        # Create grid: horizontally concatenate [clean | noisy | denoised] for each sample
+        # Each row will be one sample with three images side by side
+        image_grid = torch.cat([img_gt_rgb, noisy_rgb, denoised_rgb], dim=3)  # Concatenate along width
         writer.add_images('Train/Images', image_grid, epoch, dataformats='NCHW')
+        
+        # Save images to disk if save_path is provided
+        if save_path is not None:
+            images_dir = os.path.join(save_path, 'images')
+            os.makedirs(images_dir, exist_ok=True)
+            
+            B = img_gt_rgb.shape[0]
+            for i in range(B):
+                # Convert tensors to numpy arrays [C, H, W] -> [H, W, C] and scale to [0, 255]
+                def tensor_to_numpy(img_tensor):
+                    img_np = img_tensor[i].cpu().clamp(0.0, 1.0).numpy()  # [C, H, W]
+                    img_np = np.transpose(img_np, (1, 2, 0))  # [H, W, C]
+                    img_np = (img_np * 255.0).astype(np.uint8)
+                    return img_np
+                
+                clean_img = tensor_to_numpy(img_gt_rgb)
+                noisy_img = tensor_to_numpy(noisy_rgb)
+                denoised_img = tensor_to_numpy(denoised_rgb)
+                
+                # Save as BMP files
+                base_filename = f"epoch_{epoch:04d}_sample_{i:03d}"
+                clean_path = os.path.join(images_dir, f"{base_filename}_clean.bmp")
+                noisy_path = os.path.join(images_dir, f"{base_filename}_noisy.bmp")
+                denoised_path = os.path.join(images_dir, f"{base_filename}_denoised.bmp")
+                
+                Image.fromarray(clean_img, mode='RGB').save(clean_path)
+                Image.fromarray(noisy_img, mode='RGB').save(noisy_path)
+                Image.fromarray(denoised_img, mode='RGB').save(denoised_path)
     
     model.train()
 

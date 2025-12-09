@@ -21,8 +21,8 @@ The `stg2_denoise_optuna.py` script wraps the training process with Optuna to au
 
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --n_trials 50 \
     --n_epochs_per_trial 10 \
@@ -33,8 +33,8 @@ python stg2_denoise_optuna.py \
 
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --n_trials 100 \
     --n_epochs_per_trial 20 \
@@ -46,8 +46,8 @@ python stg2_denoise_optuna.py \
 
 ```bash
 python stg2_denoise_optuna.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --study_name denoise_optimization \
     --load_study \
@@ -127,8 +127,8 @@ After optimization, use the best parameters for full training:
 ```bash
 # Read best_params.json and extract parameters, then:
 python stg2_denoise_train.py \
-    --trainset_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony \
-    --train_list /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/data/SID/Sony2025/Sony_train_list.txt \
+    --trainset_path /workspace/data/SID/Sony \
+    --train_list /workspace/data/SID/Sony_train_list.txt \
     --use_sid_raw \
     --learning_rate_dtcn {best_lr} \
     --batch_size {best_batch_size} \
