@@ -158,6 +158,16 @@ def main(args):
     # Loss function
     criterion = nn.MSELoss().to(DEVICE)
     
+    # Loss scaling and gradient clipping settings
+    loss_scale = getattr(args, 'loss_scale', 10.0)
+    use_grad_clip = getattr(args, 'use_grad_clip', False)
+    grad_clip_max = getattr(args, 'grad_clip_max', 1.0)
+    print(f"Loss scaling: {loss_scale}x")
+    if use_grad_clip:
+        print(f"Gradient clipping enabled: max_norm={grad_clip_max}")
+    else:
+        print("Gradient clipping disabled")
+    
     # Move to device / DataParallel if available
     dn_net = dn_net.to(DEVICE)
     
@@ -351,14 +361,26 @@ def main(args):
                 global_step += 1  # Still increment global_step to maintain consistency
                 continue
             
+            # Scale loss to increase gradient strength for robust training
+            loss = loss * loss_scale
             loss.backward()
+            
+            # Gradient clipping to stabilize training and prevent vanishing gradients
+            if use_grad_clip:
+                grad_norm = torch.nn.utils.clip_grad_norm_(dn_model.parameters(), max_norm=grad_clip_max)
+                if global_step % 100 == 0:
+                    writer.add_scalar('Train/GradientNormClipped', grad_norm, global_step)
+            
             optimizer_dn.step()
             i = i + 1
             
             # Log training metrics to TensorBoard
+            # Note: loss_value is the scaled loss, log both scaled and unscaled
             loss_value = loss.item()
-            epoch_losses.append(loss_value)
-            writer.add_scalar('Train/Loss', loss_value, global_step)
+            loss_unscaled = loss_value / loss_scale  # Unscaled loss for reference
+            epoch_losses.append(loss_unscaled)  # Store unscaled loss for epoch average
+            writer.add_scalar('Train/Loss', loss_unscaled, global_step)  # Log unscaled loss
+            writer.add_scalar('Train/LossScaled', loss_value, global_step)  # Log scaled loss
             writer.add_scalar('Train/LearningRate', lr_s, global_step)
             
             # Log gradient norms periodically
