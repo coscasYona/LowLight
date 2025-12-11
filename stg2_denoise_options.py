@@ -31,6 +31,8 @@ parser.add_argument("--batch_size", type=int, default=1, help="Training batch si
 parser.add_argument("--load_thread", type=int, default=0, help="thread for data loader")
 parser.add_argument("--train_list", type=str, default="./dataset/Sony_train.txt",
                     help="Paired filename list for SID RAW training")
+parser.add_argument("--val_list", type=str, default=None,
+                    help="Paired filename list for SID RAW validation")
 parser.add_argument("--use_sid_raw", action="store_true",
                     help="Use SID RAW directory structure (short/long)")
 parser.add_argument("--fuji_trainset_path", type=str, default=None,
@@ -80,6 +82,8 @@ parser.add_argument("--steps", type=str, default="100,180", help="schedule steps
 parser.add_argument("--loss_scale", type=float, default=10.0, help="Loss scaling factor to increase gradient strength (default: 10.0)")
 parser.add_argument("--use_grad_clip", action="store_true", help="Enable gradient clipping to stabilize training")
 parser.add_argument("--grad_clip_max", type=float, default=1.0, help="Maximum gradient norm for clipping (default: 1.0)")
+parser.add_argument("--l1_weight", type=float, default=0.8, help="Weight for L1 loss in hybrid MSE+L1 loss (default: 0.8, 0.0=MSE only, 1.0=L1 only)")
+parser.add_argument("--gradient_weight", type=float, default=0.1, help="Weight for gradient/edge-preserving loss (default: 0.1, 0.0=disabled)")
 
 parser.add_argument("--save_path", type=str, default='./denoise_last_ckpt/',help="prefix added to all ckpt to be saved")
 

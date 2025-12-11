@@ -16,6 +16,7 @@ import re
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import scipy.io as sio
@@ -89,6 +90,172 @@ def build_train_dataset(args):
     return datasets_list[0]
 
 
+def build_val_dataset(args):
+    """Build validation dataset similar to training dataset"""
+    # Check if validation paths are specified
+    if not hasattr(args, 'val_list') or args.val_list is None:
+        print("No validation dataset specified (val_list not set)")
+        return None
+    
+    dataset_root = os.path.abspath(args.trainset_path)
+    datasets_list = []
+    
+    # Check if using SID validation dataset
+    use_sid = args.use_sid_raw or os.path.isdir(os.path.join(dataset_root, 'short'))
+    if use_sid:
+        val_list = args.val_list
+        val_list_path = os.path.abspath(val_list)
+        sid_val_dataset = build_sid_raw_dataset(dataset_root, val_list_path, patchsize=args.patch_size)
+        datasets_list.append(sid_val_dataset)
+        print(f"Added SID validation dataset with {len(sid_val_dataset)} samples")
+    
+    # Check if using Fuji validation dataset
+    use_fuji = args.use_fuji_raw or (args.fuji_train_list is not None)
+    if use_fuji and hasattr(args, 'fuji_val_list') and args.fuji_val_list is not None:
+        fuji_val_list = args.fuji_val_list
+        fuji_val_list_path = os.path.abspath(fuji_val_list)
+        fuji_dataset_root = os.path.abspath(args.fuji_trainset_path) if args.fuji_trainset_path else dataset_root
+        fuji_val_dataset = build_fuji_raw_dataset(fuji_dataset_root, fuji_val_list_path, patchsize=args.patch_size)
+        datasets_list.append(fuji_val_dataset)
+        print(f"Added Fuji validation dataset with {len(fuji_val_dataset)} samples")
+    
+    # If no datasets were added, return None
+    if len(datasets_list) == 0:
+        return None
+    
+    # Combine multiple datasets if both are specified
+    if len(datasets_list) > 1:
+        combined_dataset = ConcatDataset(datasets_list)
+        print(f"Combined validation dataset with {len(combined_dataset)} total samples")
+        return combined_dataset
+    
+    return datasets_list[0]
+
+
+def validate_epoch(dn_model, val_loader, criterion_mse, criterion_l1, compute_gradient_loss, 
+                   l1_weight, gradient_weight, loss_scale, args, camera_type, epoch, writer):
+    """Run validation on validation set and log metrics"""
+    dn_model.eval()
+    val_losses = []
+    val_batch_data = None
+    
+    with torch.no_grad():
+        for i, data in enumerate(val_loader):
+            img_gt = data['clean'].cuda()
+            ratio = data['ratio'].cuda()
+            iso = data['ISO'].cuda()
+            
+            batch, _, _, _ = img_gt.size()
+            # Sample random timesteps
+            timesteps = torch.randint(
+                0, args.sd_num_steps, (batch,), device=img_gt.device, dtype=torch.long
+            )
+            
+            # Base Gaussian noise for blending
+            base_noise = torch.randn_like(img_gt)
+            
+            # Get camera parameters for physics-based noise generation
+            base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
+            
+            # Sample camera parameters based on ISO
+            iso_np = iso.cpu().numpy().flatten()
+            ratio_np = ratio.cpu().numpy().flatten()
+            
+            iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
+            ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
+            
+            camera_params = sample_params_max(
+                camera_type=camera_type,
+                iso=iso_val,
+                ratio=ratio_val
+            )
+            
+            # Forward diffusion with EMVA 1288 physics noise
+            noisy_state = base_model.q_sample(
+                img_gt, 
+                base_noise, 
+                timesteps,
+                iso=iso,
+                ratio=ratio,
+                camera_params=camera_params,
+                use_physics_noise=True,
+            )
+            
+            # Store first batch for image logging
+            if i == 0:
+                val_batch_data = {
+                    'img_gt': img_gt[:min(4, batch)].detach(),
+                    'noisy_state': noisy_state[:min(4, batch)].detach(),
+                    'iso': iso[:min(4, batch)],
+                    'ratio': ratio[:min(4, batch)],
+                    'camera_params': camera_params
+                }
+            
+            # Model predicts the noise
+            pred_noise = dn_model(
+                noisy_state,
+                iso=iso,
+                ratio=ratio,
+                timesteps=timesteps,
+                predict_noise=True,
+                camera_params=camera_params,
+            )
+            
+            # Compute actual noise that was added
+            sqrt_alpha = base_model._extract(
+                base_model.sqrt_alphas_cumprod, timesteps, img_gt.shape
+            )
+            sqrt_one_minus_alpha = base_model._extract(
+                base_model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
+            )
+            sqrt_one_minus_alpha = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
+            actual_noise = (noisy_state - sqrt_alpha * img_gt) / sqrt_one_minus_alpha
+            actual_noise = torch.where(
+                torch.isfinite(actual_noise),
+                actual_noise,
+                torch.zeros_like(actual_noise)
+            )
+            actual_noise = torch.clamp(actual_noise, min=-10.0, max=10.0)
+            pred_noise = torch.where(
+                torch.isfinite(pred_noise),
+                pred_noise,
+                torch.zeros_like(pred_noise)
+            )
+            
+            # Compute loss
+            loss_mse = criterion_mse(pred_noise, actual_noise)
+            loss_l1 = criterion_l1(pred_noise, actual_noise)
+            base_weight = 1.0 - gradient_weight
+            loss = base_weight * ((1.0 - l1_weight) * loss_mse + l1_weight * loss_l1)
+            
+            if gradient_weight > 0:
+                loss_grad = compute_gradient_loss(pred_noise, actual_noise)
+                loss = loss + gradient_weight * loss_grad
+            
+            if torch.isfinite(loss):
+                val_losses.append(loss.item())
+    
+    # Compute average validation loss
+    if val_losses:
+        avg_val_loss = np.mean(val_losses)
+        writer.add_scalar('Validation/Loss', avg_val_loss, epoch)
+        print(f"Validation Loss: {avg_val_loss:.4f}")
+    else:
+        avg_val_loss = None
+    
+    # Log validation images
+    if val_batch_data is not None:
+        util.log_validation_images(
+            writer=writer,
+            epoch=epoch,
+            model=dn_model,
+            image_data=val_batch_data,
+            save_path=args.save_path
+        )
+    
+    return avg_val_loss
+
+
 def main(args):
     base_save_path = os.path.abspath(args.save_path)
     patch_folder = f"patch_{args.patch_size}"
@@ -155,13 +322,61 @@ def main(args):
     print(f"Model architecture: attention_type={attn_type}, scheduler={scheduler_type}")
     print(f"EMVA 1288 physics: camera_type={camera_type}, noise_code={noise_code}")
 
-    # Loss function
-    criterion = nn.MSELoss().to(DEVICE)
+    # Loss functions - hybrid MSE + L1 + gradient for sharper images
+    criterion_mse = nn.MSELoss().to(DEVICE)
+    criterion_l1 = nn.L1Loss().to(DEVICE)
+    l1_weight = getattr(args, 'l1_weight', 0.8)
+    gradient_weight = getattr(args, 'gradient_weight', 0.1)
+    
+    # Pre-create Sobel kernels once (memory efficient)
+    # Sobel is better than simple gradients: includes smoothing and is more robust to noise
+    sobel_kernel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], 
+                                  dtype=torch.float32, device=DEVICE).view(1, 1, 3, 3)
+    sobel_kernel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], 
+                                  dtype=torch.float32, device=DEVICE).view(1, 1, 3, 3)
+    
+    def compute_gradient_loss(pred, target):
+        """Memory-optimized illuminance-invariant gradient loss using Sobel"""
+        n_channels = pred.size(1)
+        
+        # Reuse pre-created Sobel kernels
+        kernel_x = sobel_kernel_x.repeat(n_channels, 1, 1, 1)
+        kernel_y = sobel_kernel_y.repeat(n_channels, 1, 1, 1)
+        
+        # Compute local mean for illuminance normalization (smaller 3x3 kernel saves memory)
+        pred_mean = F.avg_pool2d(torch.abs(pred), kernel_size=3, stride=1, padding=1)
+        
+        # Apply Sobel filters to prediction (needs gradients)
+        pred_gx = F.conv2d(pred, kernel_x, groups=n_channels, padding=1)
+        pred_gy = F.conv2d(pred, kernel_y, groups=n_channels, padding=1)
+        
+        # Normalize by local illuminance BEFORE computing magnitude (saves one tensor)
+        epsilon = 1e-3
+        pred_gx_norm = pred_gx / (pred_mean + epsilon)
+        pred_gy_norm = pred_gy / (pred_mean + epsilon)
+        
+        # Compute target without gradients (saves memory)
+        with torch.no_grad():
+            target_mean = F.avg_pool2d(torch.abs(target), kernel_size=3, stride=1, padding=1)
+            target_gx = F.conv2d(target, kernel_x, groups=n_channels, padding=1)
+            target_gy = F.conv2d(target, kernel_y, groups=n_channels, padding=1)
+            target_gx_norm = target_gx / (target_mean + epsilon)
+            target_gy_norm = target_gy / (target_mean + epsilon)
+        
+        # L1 loss on normalized gradient components (no magnitude tensor needed)
+        loss_x = F.l1_loss(pred_gx_norm, target_gx_norm)
+        loss_y = F.l1_loss(pred_gy_norm, target_gy_norm)
+        
+        return (loss_x + loss_y) * 0.5
     
     # Loss scaling and gradient clipping settings
     loss_scale = getattr(args, 'loss_scale', 10.0)
     use_grad_clip = getattr(args, 'use_grad_clip', False)
     grad_clip_max = getattr(args, 'grad_clip_max', 1.0)
+    loss_components = ["MSE", "L1"]
+    if gradient_weight > 0:
+        loss_components.append("Gradient")
+    print(f"Loss: Hybrid {' + '.join(loss_components)} (L1: {l1_weight}, Gradient: {gradient_weight})")
     print(f"Loss scaling: {loss_scale}x")
     if use_grad_clip:
         print(f"Gradient clipping enabled: max_norm={grad_clip_max}")
@@ -233,6 +448,20 @@ def main(args):
         pin_memory=True, 
         drop_last=False
     )
+    
+    # Set validation set DataLoader (if validation list is provided)
+    val_dataset = build_val_dataset(args)
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            dataset=val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,  # No shuffle for validation
+            num_workers=args.load_thread,
+            pin_memory=True,
+            drop_last=False
+        )
+        print(f"Validation dataset loaded with {len(val_dataset)} samples")
 
     # Training
     global_step = 0
@@ -352,8 +581,19 @@ def main(args):
                 torch.zeros_like(pred_noise)
             )
             
-            # Loss against actual noise
-            loss = criterion(pred_noise, actual_noise)
+            # Hybrid loss: MSE + L1 + Gradient for sharper images
+            # L1 reduces blur, gradient loss preserves edges
+            loss_mse = criterion_mse(pred_noise, actual_noise)
+            loss_l1 = criterion_l1(pred_noise, actual_noise)
+            
+            # Base loss: weighted combination of MSE and L1
+            base_weight = 1.0 - gradient_weight
+            loss = base_weight * ((1.0 - l1_weight) * loss_mse + l1_weight * loss_l1)
+            
+            # Add gradient loss for edge preservation
+            if gradient_weight > 0:
+                loss_grad = compute_gradient_loss(pred_noise, actual_noise)
+                loss = loss + gradient_weight * loss_grad
             
             # Check if loss is NaN/inf and skip this batch if so
             if not torch.isfinite(loss):
@@ -416,6 +656,25 @@ def main(args):
                 image_data=last_batch_data,
                 save_path=args.save_path
             )
+        
+        # Run validation if validation loader is available
+        if val_loader is not None:
+            val_loss = validate_epoch(
+                dn_model=dn_model,
+                val_loader=val_loader,
+                criterion_mse=criterion_mse,
+                criterion_l1=criterion_l1,
+                compute_gradient_loss=compute_gradient_loss,
+                l1_weight=l1_weight,
+                gradient_weight=gradient_weight,
+                loss_scale=loss_scale,
+                args=args,
+                camera_type=camera_type,
+                epoch=epoch,
+                writer=writer
+            )
+            if val_loss is not None:
+                args._final_val_loss = val_loss
 
         if epoch % args.save_every_epochs == 0:
             # Save model and checkpoint
