@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 import scipy.io as sio
 from dataset_loader import SID_Dataset_Denoise_raw
 from dataset_loader_sid import build_sid_raw_dataset, build_fuji_raw_dataset
-from torch.utils.data import ConcatDataset
+from torch.utils.data import ConcatDataset, random_split
 from stg2_denoise_options import opt
 from net.EMVA1288Diffusion import EMVA1288Diffusion
 from torch.utils.tensorboard import SummaryWriter
@@ -440,6 +440,25 @@ def main(args):
 
     # Set training set DataLoader
     train_dataset = build_train_dataset(args)
+    
+    # Set validation set DataLoader
+    val_dataset = build_val_dataset(args)
+    
+    # If no validation dataset is provided, create a split from training data
+    if val_dataset is None:
+        # Use 10% of training data for validation (minimum 1 sample, maximum 20% of dataset)
+        total_size = len(train_dataset)
+        val_size = max(1, min(int(total_size * 0.1), int(total_size * 0.2)))
+        train_size = total_size - val_size
+        
+        print(f"No validation dataset provided. Splitting training data: {train_size} train, {val_size} validation")
+        train_dataset, val_dataset = random_split(
+            train_dataset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(42)  # Fixed seed for reproducibility
+        )
+        print(f"Created validation split: {len(val_dataset)} samples from training data")
+    
     train_loader = DataLoader(
         dataset=train_dataset, 
         batch_size=args.batch_size, 
@@ -449,19 +468,16 @@ def main(args):
         drop_last=False
     )
     
-    # Set validation set DataLoader (if validation list is provided)
-    val_dataset = build_val_dataset(args)
-    val_loader = None
-    if val_dataset is not None:
-        val_loader = DataLoader(
-            dataset=val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,  # No shuffle for validation
-            num_workers=args.load_thread,
-            pin_memory=True,
-            drop_last=False
-        )
-        print(f"Validation dataset loaded with {len(val_dataset)} samples")
+    # Always create validation loader (validation will run at end of each epoch)
+    val_loader = DataLoader(
+        dataset=val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,  # No shuffle for validation
+        num_workers=args.load_thread,
+        pin_memory=True,
+        drop_last=False
+    )
+    print(f"Validation dataset loaded with {len(val_dataset)} samples")
 
     # Training
     global_step = 0
@@ -657,24 +673,27 @@ def main(args):
                 save_path=args.save_path
             )
         
-        # Run validation if validation loader is available
-        if val_loader is not None:
-            val_loss = validate_epoch(
-                dn_model=dn_model,
-                val_loader=val_loader,
-                criterion_mse=criterion_mse,
-                criterion_l1=criterion_l1,
-                compute_gradient_loss=compute_gradient_loss,
-                l1_weight=l1_weight,
-                gradient_weight=gradient_weight,
-                loss_scale=loss_scale,
-                args=args,
-                camera_type=camera_type,
-                epoch=epoch,
-                writer=writer
-            )
-            if val_loss is not None:
-                args._final_val_loss = val_loss
+        # Run validation at the end of each epoch
+        print(f"Running validation at end of epoch {epoch}...")
+        val_loss = validate_epoch(
+            dn_model=dn_model,
+            val_loader=val_loader,
+            criterion_mse=criterion_mse,
+            criterion_l1=criterion_l1,
+            compute_gradient_loss=compute_gradient_loss,
+            l1_weight=l1_weight,
+            gradient_weight=gradient_weight,
+            loss_scale=loss_scale,
+            args=args,
+            camera_type=camera_type,
+            epoch=epoch,
+            writer=writer
+        )
+        if val_loss is not None:
+            args._final_val_loss = val_loss
+            print(f"Epoch {epoch} validation complete. Validation loss: {val_loss:.4f}")
+        else:
+            print(f"Epoch {epoch} validation complete. (No valid loss computed)")
 
         if epoch % args.save_every_epochs == 0:
             # Save model and checkpoint
