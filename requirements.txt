@@ -13,7 +13,7 @@ rawpy>=0.20.0
 exifread>=3.0.0
 Pillow>=10.0.0
 scikit-image>=0.21.0
-opencv-python==4.8.1.78
+opencv-python==4.5.5.64
 
 # Utilities
 natsort>=8.0.0
