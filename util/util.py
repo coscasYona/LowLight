@@ -181,7 +181,7 @@ def write_loss(writer, prefix, avg_meters, iteration):
             os.path.join(prefix, key), meter, iteration)
 
 
-def log_training_images(writer, epoch, model, image_data, save_path=None):
+def log_training_images(writer, epoch, model, image_data, save_path=None, compute_metrics=False):
     """
     Log training images to TensorBoard and optionally save to disk.
     
@@ -198,6 +198,7 @@ def log_training_images(writer, epoch, model, image_data, save_path=None):
             - 'num_steps': (optional) Number of sampling steps, default 50
             - 'eta': (optional) Sampling eta, default 0.0
         save_path: (optional) Base path to save images. Images will be saved to {save_path}/images/
+        compute_metrics: (optional) Whether to compute and log PSNR/SNR metrics. Default False.
     """
     if image_data is None:
         return
@@ -260,6 +261,23 @@ def log_training_images(writer, epoch, model, image_data, save_path=None):
             noisy_norm = torch.clamp(noisy_state, 0.0, 1.0)
         
         denoised_norm = torch.clamp(denoised, 0.0, 1.0)
+        
+        # Compute and log PSNR/SNR metrics if requested
+        if compute_metrics and writer is not None:
+            try:
+                from util.metrics import ImageQualityMetrics, log_metrics_to_tensorboard, print_metrics_summary
+                metrics_calculator = ImageQualityMetrics(device=img_gt_norm.device, data_range=1.0)
+                metrics = metrics_calculator.compute_all_metrics(
+                    clean=img_gt_norm,
+                    noisy=noisy_norm,
+                    denoised=denoised_norm
+                )
+                log_metrics_to_tensorboard(writer, epoch, metrics, prefix='Train')
+                print_metrics_summary(metrics, prefix='Train')
+            except Exception as e:
+                print(f"Warning: Failed to compute training metrics: {e}")
+                import traceback
+                traceback.print_exc()
         
         # Convert 4-channel RAW (RGGB) to 3-channel RGB for visualization
         # RGGB format: [R, G1, B, G2] -> RGB: [R, (G1+G2)/2, B]
@@ -326,7 +344,7 @@ def log_training_images(writer, epoch, model, image_data, save_path=None):
     model.train()
 
 
-def log_validation_images(writer, epoch, model, image_data, save_path=None):
+def log_validation_images(writer, epoch, model, image_data, save_path=None, compute_metrics=True):
     """
     Log validation images to TensorBoard and optionally save to disk.
     
@@ -343,6 +361,7 @@ def log_validation_images(writer, epoch, model, image_data, save_path=None):
             - 'num_steps': (optional) Number of sampling steps, default 50
             - 'eta': (optional) Sampling eta, default 0.0
         save_path: (optional) Base path to save images. Images will be saved to {save_path}/val_images/
+        compute_metrics: (optional) Whether to compute and log PSNR/SNR metrics. Default True.
     """
     if image_data is None:
         return
@@ -405,6 +424,23 @@ def log_validation_images(writer, epoch, model, image_data, save_path=None):
             noisy_norm = torch.clamp(noisy_state, 0.0, 1.0)
         
         denoised_norm = torch.clamp(denoised, 0.0, 1.0)
+        
+        # Compute and log PSNR/SNR metrics if requested
+        if compute_metrics and writer is not None:
+            try:
+                from util.metrics import ImageQualityMetrics, log_metrics_to_tensorboard, print_metrics_summary
+                metrics_calculator = ImageQualityMetrics(device=img_gt_norm.device, data_range=1.0)
+                metrics = metrics_calculator.compute_all_metrics(
+                    clean=img_gt_norm,
+                    noisy=noisy_norm,
+                    denoised=denoised_norm
+                )
+                log_metrics_to_tensorboard(writer, epoch, metrics, prefix='Validation')
+                print_metrics_summary(metrics, prefix='Validation')
+            except Exception as e:
+                print(f"Warning: Failed to compute metrics: {e}")
+                import traceback
+                traceback.print_exc()
         
         # Convert 4-channel RAW (RGGB) to 3-channel RGB for visualization
         # RGGB format: [R, G1, B, G2] -> RGB: [R, (G1+G2)/2, B]
