@@ -139,101 +139,143 @@ def validate_epoch(dn_model, val_loader, criterion_mse, criterion_l1, compute_gr
     val_losses = []
     val_batch_data = None
     
-    with torch.no_grad():
-        for i, data in enumerate(val_loader):
-            img_gt = data['clean'].cuda()
-            ratio = data['ratio'].cuda()
-            iso = data['ISO'].cuda()
-            
-            batch, _, _, _ = img_gt.size()
-            # Sample random timesteps
-            timesteps = torch.randint(
-                0, args.sd_num_steps, (batch,), device=img_gt.device, dtype=torch.long
-            )
-            
-            # Base Gaussian noise for blending
-            base_noise = torch.randn_like(img_gt)
-            
-            # Get camera parameters for physics-based noise generation
-            base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
-            
-            # Sample camera parameters based on ISO
-            iso_np = iso.cpu().numpy().flatten()
-            ratio_np = ratio.cpu().numpy().flatten()
-            
-            iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
-            ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
-            
-            camera_params = sample_params_max(
-                camera_type=camera_type,
-                iso=iso_val,
-                ratio=ratio_val
-            )
-            
-            # Forward diffusion with EMVA 1288 physics noise
-            noisy_state = base_model.q_sample(
-                img_gt, 
-                base_noise, 
-                timesteps,
-                iso=iso,
-                ratio=ratio,
-                camera_params=camera_params,
-                use_physics_noise=True,
-            )
-            
-            # Store first batch for image logging
-            if i == 0:
-                val_batch_data = {
-                    'img_gt': img_gt[:min(4, batch)].detach(),
-                    'noisy_state': noisy_state[:min(4, batch)].detach(),
-                    'iso': iso[:min(4, batch)],
-                    'ratio': ratio[:min(4, batch)],
-                    'camera_params': camera_params
-                }
-            
-            # Model predicts the noise
-            pred_noise = dn_model(
-                noisy_state,
-                iso=iso,
-                ratio=ratio,
-                timesteps=timesteps,
-                predict_noise=True,
-                camera_params=camera_params,
-            )
-            
-            # Compute actual noise that was added
-            sqrt_alpha = base_model._extract(
-                base_model.sqrt_alphas_cumprod, timesteps, img_gt.shape
-            )
-            sqrt_one_minus_alpha = base_model._extract(
-                base_model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
-            )
-            sqrt_one_minus_alpha = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
-            actual_noise = (noisy_state - sqrt_alpha * img_gt) / sqrt_one_minus_alpha
-            actual_noise = torch.where(
-                torch.isfinite(actual_noise),
-                actual_noise,
-                torch.zeros_like(actual_noise)
-            )
-            actual_noise = torch.clamp(actual_noise, min=-10.0, max=10.0)
-            pred_noise = torch.where(
-                torch.isfinite(pred_noise),
-                pred_noise,
-                torch.zeros_like(pred_noise)
-            )
-            
-            # Compute loss
-            loss_mse = criterion_mse(pred_noise, actual_noise)
-            loss_l1 = criterion_l1(pred_noise, actual_noise)
-            base_weight = 1.0 - gradient_weight
-            loss = base_weight * ((1.0 - l1_weight) * loss_mse + l1_weight * loss_l1)
-            
-            if gradient_weight > 0:
-                loss_grad = compute_gradient_loss(pred_noise, actual_noise)
-                loss = loss + gradient_weight * loss_grad
-            
-            if torch.isfinite(loss):
-                val_losses.append(loss.item())
+    # Clear CUDA cache before validation to avoid memory issues
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    
+    try:
+        with torch.no_grad():
+            for i, data in enumerate(val_loader):
+                img_gt = data['clean'].cuda()
+                ratio = data['ratio'].cuda()
+                iso = data['ISO'].cuda()
+                
+                batch, _, _, _ = img_gt.size()
+                # Sample random timesteps
+                timesteps = torch.randint(
+                    0, args.sd_num_steps, (batch,), device=img_gt.device, dtype=torch.long
+                )
+                
+                # Base Gaussian noise for blending
+                base_noise = torch.randn_like(img_gt)
+                
+                # Get camera parameters for physics-based noise generation
+                base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
+                
+                # Sample camera parameters based on ISO
+                iso_np = iso.cpu().numpy().flatten()
+                ratio_np = ratio.cpu().numpy().flatten()
+                
+                iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
+                ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
+                
+                camera_params = sample_params_max(
+                    camera_type=camera_type,
+                    iso=iso_val,
+                    ratio=ratio_val
+                )
+                
+                # Forward diffusion with EMVA 1288 physics noise
+                noisy_state = base_model.q_sample(
+                    img_gt, 
+                    base_noise, 
+                    timesteps,
+                    iso=iso,
+                    ratio=ratio,
+                    camera_params=camera_params,
+                    use_physics_noise=True,
+                )
+                
+                # Store first batch for image logging
+                if i == 0:
+                    val_batch_data = {
+                        'img_gt': img_gt[:min(4, batch)].detach(),
+                        'noisy_state': noisy_state[:min(4, batch)].detach(),
+                        'iso': iso[:min(4, batch)],
+                        'ratio': ratio[:min(4, batch)],
+                        'camera_params': camera_params
+                    }
+                
+                # Model predicts the noise
+                pred_noise = dn_model(
+                    noisy_state,
+                    iso=iso,
+                    ratio=ratio,
+                    timesteps=timesteps,
+                    predict_noise=True,
+                    camera_params=camera_params,
+                )
+                
+                # Compute actual noise that was added
+                sqrt_alpha = base_model._extract(
+                    base_model.sqrt_alphas_cumprod, timesteps, img_gt.shape
+                )
+                sqrt_one_minus_alpha = base_model._extract(
+                    base_model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
+                )
+                sqrt_one_minus_alpha = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
+                actual_noise = (noisy_state - sqrt_alpha * img_gt) / sqrt_one_minus_alpha
+                actual_noise = torch.where(
+                    torch.isfinite(actual_noise),
+                    actual_noise,
+                    torch.zeros_like(actual_noise)
+                )
+                actual_noise = torch.clamp(actual_noise, min=-10.0, max=10.0)
+                pred_noise = torch.where(
+                    torch.isfinite(pred_noise),
+                    pred_noise,
+                    torch.zeros_like(pred_noise)
+                )
+                
+                # Compute loss
+                loss_mse = criterion_mse(pred_noise, actual_noise)
+                loss_l1 = criterion_l1(pred_noise, actual_noise)
+                base_weight = 1.0 - gradient_weight
+                loss = base_weight * ((1.0 - l1_weight) * loss_mse + l1_weight * loss_l1)
+                
+                if gradient_weight > 0:
+                    loss_grad = compute_gradient_loss(pred_noise, actual_noise)
+                    loss = loss + gradient_weight * loss_grad
+                
+                # Synchronize CUDA operations before checking loss
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                
+                if torch.isfinite(loss):
+                    val_losses.append(loss.item())
+                else:
+                    print(f"Warning: Non-finite loss detected in validation batch {i+1}, skipping...")
+        
+        # Final CUDA synchronization
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    
+    except RuntimeError as e:
+        if "CUDA" in str(e) or "cuda" in str(e).lower():
+            print(f"CUDA error during validation at epoch {epoch}: {e}")
+            print("Skipping validation for this epoch. Training will continue.")
+            # Don't call CUDA functions after a CUDA error - the context is in error state
+            # Try to reset CUDA state if possible, but don't fail if it doesn't work
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except:
+                pass  # Ignore errors when trying to clear cache after CUDA error
+            return None
+        else:
+            raise  # Re-raise if it's not a CUDA error
+    
+    except Exception as e:
+        print(f"Error during validation at epoch {epoch}: {e}")
+        print("Skipping validation for this epoch. Training will continue.")
+        # Try to clear cache, but don't fail if CUDA is in error state
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except:
+            pass  # Ignore errors when trying to clear cache
+        return None
     
     # Compute average validation loss
     if val_losses:
@@ -242,16 +284,20 @@ def validate_epoch(dn_model, val_loader, criterion_mse, criterion_l1, compute_gr
         print(f"Validation Loss: {avg_val_loss:.4f}")
     else:
         avg_val_loss = None
+        print("Warning: No valid validation losses computed")
     
-    # Log validation images
+    # Log validation images (with error handling)
     if val_batch_data is not None:
-        util.log_validation_images(
-            writer=writer,
-            epoch=epoch,
-            model=dn_model,
-            image_data=val_batch_data,
-            save_path=args.save_path
-        )
+        try:
+            util.log_validation_images(
+                writer=writer,
+                epoch=epoch,
+                model=dn_model,
+                image_data=val_batch_data,
+                save_path=args.save_path
+            )
+        except Exception as e:
+            print(f"Warning: Failed to log validation images: {e}")
     
     return avg_val_loss
 
@@ -675,6 +721,13 @@ def main(args):
         
         # Run validation at the end of each epoch
         print(f"Running validation at end of epoch {epoch}...")
+        # Clear CUDA cache before validation
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except:
+            pass  # Continue even if cache clearing fails
+        
         val_loss = validate_epoch(
             dn_model=dn_model,
             val_loader=val_loader,
@@ -693,7 +746,14 @@ def main(args):
             args._final_val_loss = val_loss
             print(f"Epoch {epoch} validation complete. Validation loss: {val_loss:.4f}")
         else:
-            print(f"Epoch {epoch} validation complete. (No valid loss computed)")
+            print(f"Epoch {epoch} validation skipped or failed. Training will continue.")
+        
+        # Clear CUDA cache after validation (with error handling)
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except:
+            pass  # Continue even if cache clearing fails
 
         if epoch % args.save_every_epochs == 0:
             # Save model and checkpoint
