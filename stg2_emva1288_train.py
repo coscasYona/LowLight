@@ -20,9 +20,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import scipy.io as sio
-from dataset_loader import SID_Dataset_Denoise_raw
-from dataset_loader_sid import build_sid_raw_dataset, build_fuji_raw_dataset
-from torch.utils.data import ConcatDataset, random_split
+from dataset_preparation import build_train_dataset, build_val_dataset
+from torch.utils.data import random_split
 from stg2_denoise_options import opt
 from net.EMVA1288Diffusion import EMVA1288Diffusion
 from torch.utils.tensorboard import SummaryWriter
@@ -48,88 +47,7 @@ def findLastCheckpoint(save_dir, save_pre):
     return initial_epoch
 
 
-def build_train_dataset(args):
-    dataset_root = os.path.abspath(args.trainset_path)
-    args.trainset_path = dataset_root
-    
-    datasets_list = []
-    
-    # Check if using SID dataset
-    use_sid = args.use_sid_raw or os.path.isdir(os.path.join(dataset_root, 'short'))
-    if use_sid:
-        train_list = args.train_list
-        if train_list is None:
-            raise ValueError("train_list must be specified when using SID RAW data")
-        train_list_path = os.path.abspath(train_list)
-        sid_dataset = build_sid_raw_dataset(dataset_root, train_list_path, patchsize=args.patch_size)
-        datasets_list.append(sid_dataset)
-        print(f"Added SID dataset with {len(sid_dataset)} samples")
-    
-    # Check if using Fuji dataset
-    use_fuji = args.use_fuji_raw or (args.fuji_train_list is not None)
-    if use_fuji:
-        fuji_train_list = args.fuji_train_list
-        if fuji_train_list is None:
-            raise ValueError("fuji_train_list must be specified when using Fuji RAW data")
-        fuji_train_list_path = os.path.abspath(fuji_train_list)
-        fuji_dataset_root = os.path.abspath(args.fuji_trainset_path) if args.fuji_trainset_path else dataset_root
-        fuji_dataset = build_fuji_raw_dataset(fuji_dataset_root, fuji_train_list_path, patchsize=args.patch_size)
-        datasets_list.append(fuji_dataset)
-        print(f"Added Fuji 2025 dataset with {len(fuji_dataset)} samples")
-    
-    # If no RAW datasets specified, fall back to MAT format
-    if len(datasets_list) == 0:
-        return SID_Dataset_Denoise_raw(dataset_root, patchsize=args.patch_size)
-    
-    # Combine multiple datasets if both are specified
-    if len(datasets_list) > 1:
-        combined_dataset = ConcatDataset(datasets_list)
-        print(f"Combined dataset with {len(combined_dataset)} total samples")
-        return combined_dataset
-    
-    return datasets_list[0]
-
-
-def build_val_dataset(args):
-    """Build validation dataset similar to training dataset"""
-    # Check if validation paths are specified
-    if not hasattr(args, 'val_list') or args.val_list is None:
-        print("No validation dataset specified (val_list not set)")
-        return None
-    
-    dataset_root = os.path.abspath(args.trainset_path)
-    datasets_list = []
-    
-    # Check if using SID validation dataset
-    use_sid = args.use_sid_raw or os.path.isdir(os.path.join(dataset_root, 'short'))
-    if use_sid:
-        val_list = args.val_list
-        val_list_path = os.path.abspath(val_list)
-        sid_val_dataset = build_sid_raw_dataset(dataset_root, val_list_path, patchsize=args.patch_size)
-        datasets_list.append(sid_val_dataset)
-        print(f"Added SID validation dataset with {len(sid_val_dataset)} samples")
-    
-    # Check if using Fuji validation dataset
-    use_fuji = args.use_fuji_raw or (args.fuji_train_list is not None)
-    if use_fuji and hasattr(args, 'fuji_val_list') and args.fuji_val_list is not None:
-        fuji_val_list = args.fuji_val_list
-        fuji_val_list_path = os.path.abspath(fuji_val_list)
-        fuji_dataset_root = os.path.abspath(args.fuji_trainset_path) if args.fuji_trainset_path else dataset_root
-        fuji_val_dataset = build_fuji_raw_dataset(fuji_dataset_root, fuji_val_list_path, patchsize=args.patch_size)
-        datasets_list.append(fuji_val_dataset)
-        print(f"Added Fuji validation dataset with {len(fuji_val_dataset)} samples")
-    
-    # If no datasets were added, return None
-    if len(datasets_list) == 0:
-        return None
-    
-    # Combine multiple datasets if both are specified
-    if len(datasets_list) > 1:
-        combined_dataset = ConcatDataset(datasets_list)
-        print(f"Combined validation dataset with {len(combined_dataset)} total samples")
-        return combined_dataset
-    
-    return datasets_list[0]
+# Dataset preparation functions moved to dataset_preparation.py
 
 
 def validate_epoch(dn_model, val_loader, criterion_mse, criterion_l1, compute_gradient_loss, 
@@ -525,8 +443,16 @@ def main(args):
     )
     print(f"Validation dataset loaded with {len(val_dataset)} samples")
 
-    # Training
+    # Training with early stopping and best model tracking
     global_step = 0
+    best_val_loss = float('inf')
+    best_epoch = 0
+    patience = getattr(args, 'early_stop_patience', 20)  # Stop if no improvement for 20 epochs
+    patience_counter = 0
+    min_delta = getattr(args, 'early_stop_min_delta', 1e-6)  # Minimum change to qualify as improvement
+    
+    print(f"Early stopping: patience={patience}, min_delta={min_delta}")
+    
     for epoch in range(start_epoch, args.epoch + 1):
         dn_model.train()
         i = 0
@@ -745,8 +671,48 @@ def main(args):
         if val_loss is not None:
             args._final_val_loss = val_loss
             print(f"Epoch {epoch} validation complete. Validation loss: {val_loss:.4f}")
+            
+            # Check for improvement and save best model
+            improvement = best_val_loss - val_loss
+            if improvement > min_delta:
+                best_val_loss = val_loss
+                best_epoch = epoch
+                patience_counter = 0
+                
+                # Save best model
+                best_model_path = os.path.join(args.save_path, 'best_model.pth')
+                save_dict = {
+                    'state_dict': dn_model.state_dict(),
+                    'optimizer_state': optimizer_dn.state_dict(),
+                    'epoch': epoch,
+                    'val_loss': val_loss,
+                    'train_loss': avg_epoch_loss if epoch_losses else None
+                }
+                torch.save(save_dict, best_model_path)
+                del save_dict
+                print(f"✓ New best model saved! Validation loss: {val_loss:.4f} (improvement: {improvement:.6f})")
+                writer.add_scalar('BestModel/ValidationLoss', val_loss, epoch)
+                writer.add_scalar('BestModel/Epoch', epoch, epoch)
+            else:
+                patience_counter += 1
+                print(f"No improvement. Patience: {patience_counter}/{patience} (best: {best_val_loss:.4f} at epoch {best_epoch})")
         else:
             print(f"Epoch {epoch} validation skipped or failed. Training will continue.")
+            patience_counter += 1  # Count failed validation as no improvement
+        
+        # Early stopping check
+        if patience_counter >= patience:
+            print(f"\nEarly stopping triggered! No improvement for {patience} epochs.")
+            print(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
+            print(f"Loading best model from epoch {best_epoch}...")
+            
+            # Load best model
+            best_model_path = os.path.join(args.save_path, 'best_model.pth')
+            if os.path.exists(best_model_path):
+                best_checkpoint = torch.load(best_model_path, map_location=DEVICE)
+                dn_model.load_state_dict(best_checkpoint['state_dict'])
+                print("✓ Best model loaded successfully.")
+            break
         
         # Clear CUDA cache after validation (with error handling)
         try:
@@ -755,25 +721,78 @@ def main(args):
         except:
             pass  # Continue even if cache clearing fails
 
+        # Save periodic checkpoints
         if epoch % args.save_every_epochs == 0:
             # Save model and checkpoint
             save_dict = {
                 'state_dict': dn_model.state_dict(),
-                'optimizer_state': optimizer_dn.state_dict()
+                'optimizer_state': optimizer_dn.state_dict(),
+                'epoch': epoch,
+                'val_loss': val_loss if val_loss is not None else None,
+                'train_loss': avg_epoch_loss if epoch_losses else None
             }
             torch.save(save_dict, os.path.join(args.save_path + args.save_prefix + '{}.pth'.format(epoch)))
             del save_dict
-            if not args.skip_eval:
-                import stg2_denoise_test_SID
-                import stg2_denoise_test_ELD
-                # test SID/Fuji - pass writer for logging
-                stg2_denoise_test_SID.valid(args, writer=writer, epoch=epoch)
-                # test ELD - pass writer for logging
-                stg2_denoise_test_ELD.valid(args, writer=writer, epoch=epoch)
+        
+        # Run test evaluation every 10 epochs (separate from checkpoint saving)
+        if epoch % 10 == 0 and not args.skip_eval:
+            print(f"\nRunning test evaluation at epoch {epoch}...")
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except:
+                pass
+            
+            import stg2_denoise_test_SID
+            import stg2_denoise_test_ELD
+            # test SID/Fuji - pass writer for logging metrics and images
+            stg2_denoise_test_SID.valid(args, writer=writer, epoch=epoch)
+            # test ELD - pass writer for logging metrics and images
+            stg2_denoise_test_ELD.valid(args, writer=writer, epoch=epoch)
+            
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except:
+                pass
+    
+    # Final test evaluation with best model
+    print("\n" + "="*60)
+    print("Running final test evaluation with best model...")
+    print("="*60)
+    
+    # Ensure we're using the best model
+    best_model_path = os.path.join(args.save_path, 'best_model.pth')
+    if os.path.exists(best_model_path):
+        best_checkpoint = torch.load(best_model_path, map_location=DEVICE)
+        dn_model.load_state_dict(best_checkpoint['state_dict'])
+        epoch_val = best_checkpoint.get('epoch', 'unknown')
+        val_loss_val = best_checkpoint.get('val_loss', None)
+        print(f"Loaded best model from epoch {epoch_val}")
+        if val_loss_val is not None:
+            print(f"Best validation loss: {val_loss_val:.4f}")
+        else:
+            print("Best validation loss: unknown (not available in checkpoint)")
+    
+    if not args.skip_eval:
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except:
+            pass
+        
+        import stg2_denoise_test_SID
+        import stg2_denoise_test_ELD
+        # Final test evaluation
+        stg2_denoise_test_SID.valid(args, writer=writer, epoch=args.epoch)
+        stg2_denoise_test_ELD.valid(args, writer=writer, epoch=args.epoch)
     
     # Close TensorBoard writer
     writer.close()
+    print("\n" + "="*60)
     print("Training completed. TensorBoard logs saved.")
+    print(f"Best model: epoch {best_epoch}, validation loss: {best_val_loss:.4f}")
+    print("="*60)
     
     return getattr(args, '_final_epoch_loss', None)
 
