@@ -1,0 +1,28 @@
+# ELD (Extreme Low-light Denoising) Dataset Configuration
+
+# Dataset type
+type: eld
+
+# Paths
+train_dir: ${oc.env:ELD_DATASET_PATH,../dataset/ELD_new}
+eval_dir: ${oc.env:ELD_DATASET_PATH,../dataset/ELD_new}
+
+# Camera settings
+cameras:
+  - name: SonyA7S2
+    suffix: .ARW
+  - name: NikonD850
+    suffix: .nef
+  - name: CanonEOS5D4
+    suffix: .CR2
+
+# Scenes for evaluation
+scenes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+img_ids_set1: [4, 9, 14]
+img_ids_set2: [5, 10, 15]
+
+# Data loading
+batch_size: 1
+num_workers: 4
+pin_memory: true
+

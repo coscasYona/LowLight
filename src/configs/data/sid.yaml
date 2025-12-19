@@ -1,0 +1,24 @@
+# SID (See in the Dark) Dataset Configuration
+
+# Dataset type
+type: sid
+
+# Paths
+train_dir: ${oc.env:SID_DATASET_PATH,../dataset/SID/Sony}
+val_dir: ${oc.env:SID_DATASET_PATH,../dataset/SID/Sony}
+train_list: ./dataset/Sony_train.txt
+val_list: ./dataset/Sony_val.txt
+
+# Data loading
+batch_size: 1
+num_workers: 4
+pin_memory: true
+patch_size: 512
+
+# Dataset flags
+use_sid_raw: true
+use_fuji_raw: false
+
+# Validation split (used if val_list not provided)
+val_split: 0.1
+
