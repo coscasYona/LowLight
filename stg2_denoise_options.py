@@ -52,7 +52,7 @@ parser.add_argument("--in_channels", type=int, default=4, help="Input RAW channe
 parser.add_argument("--out_channels", type=int, default=4, help="Output RAW channels")
 parser.add_argument("--sd_base_channels", type=int, default=32, help="Base width for SD denoiser")
 parser.add_argument("--sd_channel_mults", type=str, default="1,2,4", help="Comma separated channel multipliers")
-parser.add_argument("--sd_num_steps", type=int, default=4, help="Diffusion refinement iterations")
+parser.add_argument("--sd_num_steps", type=int, default=200, help="Diffusion refinement iterations")
 parser.add_argument("--sd_time_embed_dim", type=int, default=64, help="Time embedding width")
 parser.add_argument("--sd_cond_dim", type=int, default=64, help="Physics conditioning width")
 parser.add_argument("--sd_attn_type", type=str, default="linear", choices=["linear", "channel"],
