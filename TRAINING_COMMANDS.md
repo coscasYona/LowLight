@@ -1,162 +1,344 @@
-# Training Commands - Complete CLI Examples
+# EMVA 1288 Physics-Guided Diffusion - Training Commands
 
-## Basic Training with Linear Attention (Recommended)
+This document contains CLI commands for training the EMVA 1288 diffusion model. All commands should be run from the `src/` directory.
 
-```bash
-python stg2_denoise_train.py \
-    --trainset_path /workspace/data/SID/Sony \
-    --train_list /workspace/data/SID/Sony_train_list.txt \
-    --use_sid_raw \
-    --sd_attn_type linear \
-    --sd_scheduler ddim \
-    --epoch 500 \
-    --batch_size 8 \
-    --load_thread 8 \
-    --patch_size 128 \
-    --sd_base_channels 16 \
-    --sd_channel_mults 1,2 \
-    --save_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/runs/sid_try/ \
-    --save_prefix sid_try_epoch_ \
-    --resume new \
-    --skip_eval
-```
-
-## Maximum Memory Efficiency (Channel Attention + Gradient Checkpointing)
+## Setup
 
 ```bash
-python stg2_denoise_train.py \
-    --trainset_path /workspace/data/SID/Sony \
-    --train_list /workspace/data/SID/Sony_train_list.txt \
-    --use_sid_raw \
-    --sd_attn_type channel \
-    --sd_scheduler ddim \
-    --use_gradient_checkpointing \
-    --epoch 500 \
-    --batch_size 16 \
-    --load_thread 8 \
-    --patch_size 128 \
-    --sd_base_channels 16 \
-    --sd_channel_mults 1,2 \
-    --save_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/runs/sid_try/ \
-    --save_prefix sid_try_epoch_ \
-    --resume new \
-    --skip_eval
+cd /workspace/src
+export PYTHONPATH=$PYTHONPATH:$(pwd)
 ```
 
-## Full Training with Validation (Linear Attention)
+---
+
+## Training Configurations
+
+### 1. Default Training (SID Dataset)
+
+Basic training with default settings on the SID (See in the Dark) dataset.
 
 ```bash
-python stg2_denoise_train.py \
-    --trainset_path /workspace/data/SID/Sony \
-    --train_list /workspace/data/SID/Sony_train_list.txt \
-    --use_sid_raw \
-    --eval_dir /workspace/data/SID/Sony \
-    --sd_attn_type linear \
-    --sd_scheduler ddim \
-    --epoch 500 \
-    --batch_size 8 \
-    --load_thread 8 \
-    --patch_size 128 \
-    --sd_base_channels 16 \
-    --sd_channel_mults 1,2 \
-    --sd_num_steps 4 \
-    --sd_time_embed_dim 64 \
-    --sd_cond_dim 64 \
-    --save_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/runs/sid_try/ \
-    --save_prefix sid_try_epoch_ \
-    --save_every_epochs 1 \
-    --learning_rate_dtcn 1e-4 \
-    --resume new
+python scripts/train.py
 ```
 
-## Training with Both SID and Fuji Datasets (Linear Attention)
+---
+
+### 2. Training with Measurement Conditioning
+
+Enable measurement conditioning for better image quality. The model learns to leverage the actual sensor noise structure by concatenating the real noisy input with the diffusion state.
 
 ```bash
-python stg2_denoise_train.py \
-    --trainset_path /workspace/data/SID/Sony \
-    --train_list /workspace/data/SID/Sony_train_list.txt \
-    --use_sid_raw \
-    --fuji_trainset_path /workspace/data/SID/Fuji \
-    --fuji_train_list /workspace/data/SID/Fuji_train_list.txt \
-    --use_fuji_raw \
-    --sd_attn_type linear \
-    --sd_scheduler ddim \
-    --epoch 500 \
-    --batch_size 8 \
-    --load_thread 8 \
-    --patch_size 128 \
-    --sd_base_channels 16 \
-    --sd_channel_mults 1,2 \
-    --save_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/runs/combined_try/ \
-    --save_prefix combined_epoch_ \
-    --resume new \
-    --skip_eval
+python scripts/train.py model.use_measurement_cond=true
 ```
 
-## Resume Training
+---
+
+### 3. Training on ELD Dataset
+
+Train on the Extreme Low-light Denoising (ELD) dataset instead of SID.
 
 ```bash
-python stg2_denoise_train.py \
-    --trainset_path /workspace/data/SID/Sony \
-    --train_list /workspace/data/SID/Sony_train_list.txt \
-    --use_sid_raw \
-    --sd_attn_type linear \
-    --epoch 500 \
-    --batch_size 8 \
-    --load_thread 8 \
-    --patch_size 128 \
-    --sd_base_channels 16 \
-    --sd_channel_mults 1,2 \
-    --save_path /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model/runs/sid_try/ \
-    --save_prefix sid_try_epoch_ \
-    --resume continue \
-    --skip_eval
+python scripts/train.py data=eld
 ```
 
-## Parameter Descriptions
+---
 
-### Required Arguments
-- `--trainset_path`: Path to training dataset root directory
-- `--train_list`: Path to training list file (for SID RAW format)
-- `--use_sid_raw`: Flag to use SID RAW directory structure
+### 4. Fast/Debug Training
 
-### Architecture Arguments
-- `--sd_attn_type`: Attention type - `linear` (recommended, default), `channel` (most efficient)
-- `--sd_scheduler`: Diffusion scheduler - `ddpm` (original), `ddim` (faster, deterministic)
-- `--use_gradient_checkpointing`: Enable for additional memory savings (slower training)
+Quick training run for debugging or testing changes (fewer epochs, smaller model).
 
-### Training Arguments
-- `--epoch`: Number of training epochs
-- `--batch_size`: Batch size (can increase with efficient attention)
-- `--patch_size`: Patch size for training
-- `--sd_base_channels`: Base number of channels
-- `--sd_channel_mults`: Channel multipliers (comma-separated, e.g., "1,2" or "1,2,4")
-- `--learning_rate_dtcn`: Learning rate (default: 1e-4)
-- `--save_every_epochs`: Save checkpoint every N epochs
+```bash
+python scripts/train.py \
+    training.epochs=5 \
+    model.base_channels=16 \
+    model.num_steps=2 \
+    logging.log_every_n_steps=10
+```
 
-### Path Arguments
-- `--save_path`: Directory to save checkpoints
-- `--save_prefix`: Prefix for checkpoint filenames
-- `--resume`: `new` for new training, `continue` to resume
+---
 
-### Optional Arguments
-- `--skip_eval`: Skip validation during training (faster)
-- `--load_thread`: Number of data loading threads
-- `--eval_dir`: Path to evaluation dataset (if not skipping eval)
+### 5. Monitor PSNR for Checkpoints
 
-## Memory Usage Comparison
+Use PSNR (Peak Signal-to-Noise Ratio) instead of loss for checkpoint selection and early stopping. Better for image quality optimization.
 
-| Configuration | Approx. GPU Memory | Batch Size |
-|--------------|-------------------|------------|
-| Linear attention | ~2GB | 8-16 |
-| Channel attention | ~1GB | 16-32 |
-| Channel + checkpointing | ~0.5GB | 32+ |
+```bash
+python scripts/train.py \
+    checkpoint.monitor=val/psnr \
+    checkpoint.mode=max \
+    early_stopping.monitor=val/psnr \
+    early_stopping.mode=max
+```
 
-## Tips
+---
 
-1. **Start with linear attention** - Best balance of memory and performance
-2. **Use DDIM scheduler** - Faster inference, deterministic results
-3. **Increase batch size** - With efficient attention, you can use larger batches
-4. **Enable gradient checkpointing** - If still running out of memory
-5. **Use channel attention** - For maximum memory savings (may need fine-tuning)
+### 6. Mixed Precision Training (FP16)
 
+Enable mixed precision training for faster training and lower memory usage on modern GPUs.
+
+```bash
+python scripts/train.py hardware.precision=16-mixed
+```
+
+---
+
+### 7. Training with EMA (Exponential Moving Average)
+
+Enable EMA for smoother model weights and potentially better generalization.
+
+```bash
+python scripts/train.py \
+    training.use_ema=true \
+    training.ema_decay=0.9999
+```
+
+---
+
+### 8. Full Quality Training (Recommended for Best Results)
+
+Combines measurement conditioning, PSNR monitoring, and EMA for optimal image enhancement quality.
+
+```bash
+python scripts/train.py \
+    model.use_measurement_cond=true \
+    checkpoint.monitor=val/psnr \
+    checkpoint.mode=max \
+    early_stopping.monitor=val/psnr \
+    early_stopping.mode=max \
+    training.use_ema=true
+```
+
+---
+
+### 9. Higher Learning Rate with Gradient Clipping
+
+Use a higher learning rate with gradient clipping for potentially faster convergence.
+
+```bash
+python scripts/train.py \
+    training.learning_rate=5e-4 \
+    training.use_grad_clip=true \
+    training.grad_clip_max=1.0
+```
+
+---
+
+### 10. Custom Paths
+
+Specify custom dataset paths and output directories.
+
+```bash
+# Set dataset path via environment variable
+export SID_DATASET_PATH=/path/to/SID/Sony
+
+python scripts/train.py \
+    paths.save_dir=./output/experiment_1 \
+    paths.log_dir=./output/logs
+```
+
+---
+
+### 11. Long Training with More Epochs
+
+Extended training for better convergence.
+
+```bash
+python scripts/train.py \
+    training.epochs=500 \
+    early_stopping.patience=50
+```
+
+---
+
+### 12. Larger Model (More Channels)
+
+Train a larger model with more capacity.
+
+```bash
+python scripts/train.py \
+    model.base_channels=64 \
+    model.channel_mults=[1,2,4,8]
+```
+
+---
+
+### 13. More Diffusion Steps
+
+Use more diffusion steps for potentially better quality (slower training).
+
+```bash
+python scripts/train.py model.num_steps=10
+```
+
+---
+
+### 14. DDIM Scheduler (Faster Sampling)
+
+Use DDIM scheduler for faster sampling during inference.
+
+```bash
+python scripts/train.py model.scheduler=ddim
+```
+
+---
+
+### 15. Different Camera Type
+
+Train for a specific camera type (affects noise model parameters).
+
+```bash
+# For Sony A7S2 (default)
+python scripts/train.py model.camera_type=SonyA7S2
+
+# For Nikon D850
+python scripts/train.py model.camera_type=NikonD850
+```
+
+---
+
+## Inference Commands
+
+### Single Image Denoising
+
+```bash
+python scripts/inference.py \
+    --checkpoint ./checkpoints/best.ckpt \
+    --input /path/to/noisy_image.ARW \
+    --output /path/to/denoised.png \
+    --ratio 200
+```
+
+### With Custom ISO
+
+```bash
+python scripts/inference.py \
+    --checkpoint ./checkpoints/best.ckpt \
+    --input /path/to/noisy_image.ARW \
+    --output /path/to/denoised.png \
+    --ratio 200 \
+    --iso 6400
+```
+
+### Save Noisy Input for Comparison
+
+```bash
+python scripts/inference.py \
+    --checkpoint ./checkpoints/best.ckpt \
+    --input /path/to/noisy_image.ARW \
+    --output /path/to/denoised.png \
+    --ratio 200 \
+    --save_noisy
+```
+
+---
+
+## Evaluation Commands
+
+### Evaluate on SID Dataset
+
+```bash
+python scripts/evaluate.py \
+    --checkpoint ./checkpoints/best.ckpt \
+    --dataset sid
+```
+
+### Evaluate on ELD Dataset
+
+```bash
+python scripts/evaluate.py \
+    --checkpoint ./checkpoints/best.ckpt \
+    --dataset eld
+```
+
+### Evaluate on Both Datasets
+
+```bash
+python scripts/evaluate.py \
+    --checkpoint ./checkpoints/best.ckpt \
+    --dataset all
+```
+
+### Custom Dataset Paths
+
+```bash
+python scripts/evaluate.py \
+    --checkpoint ./checkpoints/best.ckpt \
+    --dataset sid \
+    --sid_dir /custom/path/to/SID/Sony \
+    --val_list ./dataset/Sony_val.txt \
+    --test_list ./dataset/Sony_test.txt
+```
+
+---
+
+## Testing Commands
+
+### Run All Tests
+
+```bash
+cd /workspace
+PYTHONPATH=$PYTHONPATH:src python -m pytest src/tests/ -v
+```
+
+### Run Specific Test File
+
+```bash
+PYTHONPATH=$PYTHONPATH:src python -m pytest src/tests/test_lightning_module.py -v
+```
+
+### Run Tests with Coverage
+
+```bash
+PYTHONPATH=$PYTHONPATH:src python -m pytest src/tests/ -v --cov=src --cov-report=html
+```
+
+---
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SID_DATASET_PATH` | Path to SID dataset | `../dataset/SID/Sony` |
+| `ELD_DATASET_PATH` | Path to ELD dataset | `../dataset/ELD_new` |
+| `CUDA_VISIBLE_DEVICES` | GPU device(s) to use | All available |
+
+Example:
+```bash
+export SID_DATASET_PATH=/data/SID/Sony
+export CUDA_VISIBLE_DEVICES=0,1
+python scripts/train.py
+```
+
+---
+
+## Hydra Configuration Tips
+
+Hydra allows flexible configuration overrides from the command line:
+
+```bash
+# Override nested values with dot notation
+python scripts/train.py training.learning_rate=1e-3
+
+# Override multiple values
+python scripts/train.py training.epochs=100 model.num_steps=8
+
+# Use different config files
+python scripts/train.py model=unet data=eld
+
+# Show effective config without running
+python scripts/train.py --cfg job
+
+# Print help
+python scripts/train.py --help
+```
+
+---
+
+## TensorBoard Monitoring
+
+Start TensorBoard to monitor training progress:
+
+```bash
+tensorboard --logdir ./logs
+```
+
+Then open http://localhost:6006 in your browser.

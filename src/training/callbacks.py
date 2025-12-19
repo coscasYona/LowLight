@@ -80,13 +80,24 @@ class ImageLoggingCallback(Callback):
             noisy_state = image_output['noisy_state']
             iso = image_output['iso']
             ratio = image_output['ratio']
+            camera_params_list = image_output.get('camera_params_list')
             
-            # Generate denoised images
+            # Use real noisy input if available (better for visualization)
+            img_noisy = image_output.get('img_noisy', noisy_state)
+            
+            # Determine if we should pass cond_image for measurement conditioning
+            cond_image = None
+            if hasattr(pl_module, 'use_measurement_cond') and pl_module.use_measurement_cond:
+                cond_image = img_noisy
+            
+            # Generate denoised images from real noisy input
             denoised = model.sample(
-                noisy_state,
+                img_noisy,
                 iso=iso,
                 ratio=ratio,
                 num_steps=min(50, pl_module.num_steps),
+                camera_params=camera_params_list[0] if camera_params_list else None,
+                cond_image=cond_image,
             )
             
             # Convert to RGB for visualization (4ch RGGB -> 3ch RGB)
@@ -103,7 +114,7 @@ class ImageLoggingCallback(Callback):
                 return x
             
             img_gt_rgb = to_rgb(img_gt.clamp(0, 1))
-            noisy_rgb = to_rgb(noisy_state.clamp(0, 1))
+            noisy_rgb = to_rgb(img_noisy.clamp(0, 1))
             denoised_rgb = to_rgb(denoised.clamp(0, 1))
             
             # Log to TensorBoard

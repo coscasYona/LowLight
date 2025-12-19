@@ -138,11 +138,14 @@ def main():
     print("Running denoising...")
     with torch.no_grad():
         num_steps = args.num_steps or model.num_steps
+        # Pass noisy input as cond_image if model uses measurement conditioning
+        cond_image = image if model.use_measurement_cond else None
         denoised = model.model.sample(
             image,
             iso=iso_tensor,
             ratio=ratio_tensor,
             num_steps=num_steps,
+            cond_image=cond_image,
         )
     
     # Save output

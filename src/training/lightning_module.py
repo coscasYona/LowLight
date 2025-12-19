@@ -49,6 +49,7 @@ class EMVA1288LightningModule(pl.LightningModule):
         scheduler: str = "ddpm",
         camera_type: str = "SonyA7S2",
         noise_code: str = "prq",
+        use_measurement_cond: bool = False,
         learning_rate: float = 1e-4,
         l1_weight: float = 0.8,
         gradient_weight: float = 0.1,
@@ -74,6 +75,7 @@ class EMVA1288LightningModule(pl.LightningModule):
             scheduler = getattr(model_config, 'scheduler', scheduler)
             camera_type = getattr(model_config, 'camera_type', camera_type)
             noise_code = getattr(model_config, 'noise_code', noise_code)
+            use_measurement_cond = getattr(model_config, 'use_measurement_cond', use_measurement_cond)
         
         if training_config is not None:
             learning_rate = getattr(training_config, 'learning_rate', learning_rate)
@@ -89,6 +91,7 @@ class EMVA1288LightningModule(pl.LightningModule):
         self.use_ema = use_ema
         self.ema_decay = ema_decay
         self.num_steps = num_steps
+        self.use_measurement_cond = use_measurement_cond
         
         # Ensure channel_mults is a tuple
         if isinstance(channel_mults, str):
@@ -96,9 +99,12 @@ class EMVA1288LightningModule(pl.LightningModule):
         elif not isinstance(channel_mults, tuple):
             channel_mults = tuple(channel_mults)
         
+        # Double input channels when using measurement conditioning (x_t concat with noisy)
+        model_in_channels = in_channels * 2 if use_measurement_cond else in_channels
+        
         # Create model
         self.model = EMVA1288Diffusion(
-            in_channels=in_channels,
+            in_channels=model_in_channels,
             out_channels=out_channels,
             base_channels=base_channels,
             channel_mults=channel_mults,
@@ -109,6 +115,7 @@ class EMVA1288LightningModule(pl.LightningModule):
             scheduler=scheduler,
             camera_type=camera_type,
             noise_code=noise_code,
+            use_measurement_cond=use_measurement_cond,
         )
         
         # Loss function
@@ -165,7 +172,7 @@ class EMVA1288LightningModule(pl.LightningModule):
         self, batch: Dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
         """
-        Training step.
+        Training step with EMVA 1288 physics-based noise (aligned with validation).
         
         Args:
             batch: Dict with 'clean', 'noisy', 'ratio', 'ISO'
@@ -189,38 +196,50 @@ class EMVA1288LightningModule(pl.LightningModule):
         # Generate base noise
         base_noise = torch.randn_like(img_gt)
         
-        # Get camera parameters
+        # Get per-sample camera parameters for proper EMVA noise generation
         iso_np = iso.cpu().numpy().flatten()
         ratio_np = ratio.cpu().numpy().flatten()
-        iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
-        ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
+        camera_params_list = []
+        for i in range(batch_size):
+            iso_val = int(iso_np[i]) if i < len(iso_np) else 6400
+            ratio_val = float(ratio_np[i]) if i < len(ratio_np) else 200.0
+            params = sample_params_max(
+                camera_type=self.camera_type,
+                iso=iso_val,
+                ratio=ratio_val
+            )
+            camera_params_list.append(params)
         
-        camera_params = sample_params_max(
-            camera_type=self.camera_type,
-            iso=iso_val,
-            ratio=ratio_val
+        # Get real noisy measurement for conditioning (if available and enabled)
+        img_noisy = batch.get('noisy', None)
+        cond_image = img_noisy if self.use_measurement_cond and img_noisy is not None else None
+        
+        # Forward diffusion with EMVA 1288 physics-based noise (matching validation)
+        noisy_state = self.model.q_sample(
+            img_gt, base_noise, timesteps,
+            iso=iso, ratio=ratio,
+            camera_params=camera_params_list,
+            use_physics_noise=True,
         )
         
-        # Forward diffusion (simple Gaussian for training efficiency)
-        sqrt_alpha = self.model._extract(
-            self.model.sqrt_alphas_cumprod, timesteps, img_gt.shape
-        )
-        sqrt_one_minus_alpha = self.model._extract(
-            self.model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
-        )
-        noisy_state = sqrt_alpha * img_gt + sqrt_one_minus_alpha * base_noise
-        
-        # Predict noise
+        # Predict noise (with measurement conditioning if enabled)
         pred_noise = self.model(
             noisy_state,
             iso=iso,
             ratio=ratio,
             timesteps=timesteps,
             predict_noise=True,
-            camera_params=camera_params,
+            camera_params=camera_params_list,
+            cond_image=cond_image,
         )
         
-        # Compute actual noise
+        # Compute actual noise (from forward diffusion)
+        sqrt_alpha = self.model._extract(
+            self.model.sqrt_alphas_cumprod, timesteps, img_gt.shape
+        )
+        sqrt_one_minus_alpha = self.model._extract(
+            self.model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
+        )
         sqrt_one_minus_alpha_safe = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
         actual_noise = (noisy_state - sqrt_alpha * img_gt) / sqrt_one_minus_alpha_safe
         actual_noise = torch.where(
@@ -254,7 +273,7 @@ class EMVA1288LightningModule(pl.LightningModule):
         self, batch: Dict[str, torch.Tensor], batch_idx: int
     ) -> Dict[str, torch.Tensor]:
         """
-        Validation step with physics-based noise.
+        Validation step with physics-based noise and real denoising metrics.
         
         Args:
             batch: Dict with 'clean', 'noisy', 'ratio', 'ISO'
@@ -264,6 +283,7 @@ class EMVA1288LightningModule(pl.LightningModule):
             Dict with validation metrics
         """
         img_gt = batch['clean']
+        img_noisy = batch.get('noisy', None)  # Real noisy measurement from dataset
         ratio = batch['ratio']
         iso = batch['ISO']
         
@@ -277,34 +297,40 @@ class EMVA1288LightningModule(pl.LightningModule):
         
         base_noise = torch.randn_like(img_gt)
         
-        # Get camera params
+        # Get per-sample camera params
         iso_np = iso.cpu().numpy().flatten()
         ratio_np = ratio.cpu().numpy().flatten()
-        iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
-        ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
+        camera_params_list = []
+        for i in range(batch_size):
+            iso_val = int(iso_np[i]) if i < len(iso_np) else 6400
+            ratio_val = float(ratio_np[i]) if i < len(ratio_np) else 200.0
+            params = sample_params_max(
+                camera_type=self.camera_type,
+                iso=iso_val,
+                ratio=ratio_val
+            )
+            camera_params_list.append(params)
         
-        camera_params = sample_params_max(
-            camera_type=self.camera_type,
-            iso=iso_val,
-            ratio=ratio_val
-        )
+        # Get real noisy measurement for conditioning (if available and enabled)
+        cond_image = img_noisy if self.use_measurement_cond and img_noisy is not None else None
         
         # Forward with physics noise for validation
         noisy_state = self.model.q_sample(
             img_gt, base_noise, timesteps,
             iso=iso, ratio=ratio,
-            camera_params=camera_params,
+            camera_params=camera_params_list,
             use_physics_noise=True,
         )
         
-        # Predict noise
+        # Predict noise (with measurement conditioning if enabled)
         pred_noise = self.model(
             noisy_state,
             iso=iso,
             ratio=ratio,
             timesteps=timesteps,
             predict_noise=True,
-            camera_params=camera_params,
+            camera_params=camera_params_list,
+            cond_image=cond_image,
         )
         
         # Compute actual noise
@@ -325,7 +351,7 @@ class EMVA1288LightningModule(pl.LightningModule):
             torch.isfinite(pred_noise), pred_noise, torch.zeros_like(pred_noise)
         )
         
-        # Compute loss
+        # Compute noise prediction loss
         loss = self.loss_fn(pred_noise, actual_noise)
         
         if torch.isfinite(loss):
@@ -334,12 +360,17 @@ class EMVA1288LightningModule(pl.LightningModule):
                 'batch_idx': batch_idx,
             }
             
-            # Store first batch for image logging
+            # Store first batch for image logging and real denoising metrics
             if batch_idx == 0:
                 output['img_gt'] = img_gt[:min(4, batch_size)].detach()
                 output['noisy_state'] = noisy_state[:min(4, batch_size)].detach()
                 output['iso'] = iso[:min(4, batch_size)]
                 output['ratio'] = ratio[:min(4, batch_size)]
+                output['camera_params_list'] = camera_params_list[:min(4, batch_size)]
+                
+                # Store real noisy input for denoising evaluation
+                if img_noisy is not None:
+                    output['img_noisy'] = img_noisy[:min(4, batch_size)].detach()
             
             self.validation_step_outputs.append(output)
             return output
@@ -347,7 +378,7 @@ class EMVA1288LightningModule(pl.LightningModule):
         return {'val_loss': torch.tensor(0.0, device=self.device)}
     
     def on_validation_epoch_end(self):
-        """Aggregate validation metrics at epoch end."""
+        """Aggregate validation metrics at epoch end, including real denoising metrics."""
         if not self.validation_step_outputs:
             return
         
@@ -360,6 +391,31 @@ class EMVA1288LightningModule(pl.LightningModule):
         if val_losses:
             avg_val_loss = torch.stack(val_losses).mean()
             self.log('val/loss', avg_val_loss, prog_bar=True, sync_dist=True)
+        
+        # Compute denoising metrics on first batch (if real noisy input available)
+        first_batch = self.validation_step_outputs[0] if self.validation_step_outputs else None
+        if first_batch and 'img_noisy' in first_batch and 'img_gt' in first_batch:
+            img_noisy = first_batch['img_noisy']
+            img_gt = first_batch['img_gt']
+            iso = first_batch.get('iso')
+            ratio = first_batch.get('ratio')
+            camera_params_list = first_batch.get('camera_params_list')
+            
+            # Sample denoised output from real noisy measurement
+            with torch.no_grad():
+                denoised = self.model.sample(
+                    img_noisy,
+                    iso=iso,
+                    ratio=ratio,
+                    num_steps=self.num_steps,
+                    camera_params=camera_params_list[0] if camera_params_list else None,
+                    cond_image=img_noisy if self.model.use_measurement_cond else None,
+                )
+                
+                # Compute PSNR and SSIM on denoised output
+                metrics = self.metrics(denoised, img_gt)
+                self.log('val/psnr', metrics['psnr'], prog_bar=True, sync_dist=True)
+                self.log('val/ssim', metrics['ssim'], sync_dist=True)
         
         # Clear outputs
         self.validation_step_outputs.clear()

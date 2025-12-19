@@ -24,3 +24,8 @@ schedule_type: linear
 camera_type: SonyA7S2
 noise_code: prq  # p=Poisson shot, r=row, q=quantization
 
+# Measurement conditioning: concatenate real noisy input with x_t
+# When enabled, in_channels is automatically doubled for the U-Net
+# This helps the model learn to leverage the actual sensor noise structure
+use_measurement_cond: false  # Set to true for better quality when real noisy data is available
+

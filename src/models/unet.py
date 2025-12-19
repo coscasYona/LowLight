@@ -246,6 +246,8 @@ class SlimUNet(nn.Module):
         attn_type: str = "linear",
     ):
         super().__init__()
+        self.in_ch = in_ch
+        self.out_ch = out_ch
         self.in_conv = nn.Conv2d(in_ch, base_ch, 3, padding=1)
         self.emb_proj = nn.Sequential(nn.SiLU(), nn.Linear(emb_dim, emb_dim))
 

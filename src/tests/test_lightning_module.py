@@ -70,7 +70,7 @@ class TestEMVA1288LightningModule:
     
     @pytest.fixture
     def model(self):
-        """Create test model."""
+        """Create test model without measurement conditioning."""
         return EMVA1288LightningModule(
             in_channels=4,
             out_channels=4,
@@ -80,6 +80,22 @@ class TestEMVA1288LightningModule:
             time_embed_dim=32,
             cond_embed_dim=32,
             learning_rate=1e-4,
+            use_measurement_cond=False,
+        )
+    
+    @pytest.fixture
+    def model_with_cond(self):
+        """Create test model with measurement conditioning (8 input channels)."""
+        return EMVA1288LightningModule(
+            in_channels=4,  # Will be doubled to 8 internally for U-Net
+            out_channels=4,
+            base_channels=16,
+            channel_mults=(1, 2),
+            num_steps=5,
+            time_embed_dim=32,
+            cond_embed_dim=32,
+            learning_rate=1e-4,
+            use_measurement_cond=True,
         )
     
     def test_forward(self, model):
@@ -106,6 +122,39 @@ class TestEMVA1288LightningModule:
         assert loss.ndim == 0
         assert torch.isfinite(loss)
     
+    def test_training_step_with_measurement_cond(self, model_with_cond):
+        """Test training step with measurement conditioning."""
+        batch = {
+            'clean': torch.randn(2, 4, 32, 32).clamp(0, 1),
+            'noisy': torch.randn(2, 4, 32, 32).clamp(0, 1),
+            'ratio': torch.tensor([[200.0], [100.0]]),
+            'ISO': torch.tensor([[6400.0], [3200.0]]),
+        }
+        
+        loss = model_with_cond.training_step(batch, 0)
+        
+        assert loss.ndim == 0
+        assert torch.isfinite(loss)
+    
+    def test_training_step_with_measurement_cond_no_noisy_key(self, model_with_cond):
+        """Test training step with measurement cond enabled but no 'noisy' key in batch.
+        
+        This tests the fallback behavior where the model uses the diffusion state
+        as the conditioning image when no real noisy input is available.
+        """
+        batch = {
+            'clean': torch.randn(2, 4, 32, 32).clamp(0, 1),
+            # No 'noisy' key - should use fallback
+            'ratio': torch.tensor([[200.0], [100.0]]),
+            'ISO': torch.tensor([[6400.0], [3200.0]]),
+        }
+        
+        # Should not raise dimension mismatch error
+        loss = model_with_cond.training_step(batch, 0)
+        
+        assert loss.ndim == 0
+        assert torch.isfinite(loss)
+    
     def test_validation_step(self, model):
         """Test validation step."""
         batch = {
@@ -118,6 +167,28 @@ class TestEMVA1288LightningModule:
         output = model.validation_step(batch, 0)
         
         assert 'val_loss' in output
+    
+    def test_validation_step_with_measurement_cond(self, model_with_cond):
+        """Test validation step with measurement conditioning."""
+        batch = {
+            'clean': torch.randn(2, 4, 32, 32).clamp(0, 1),
+            'noisy': torch.randn(2, 4, 32, 32).clamp(0, 1),
+            'ratio': torch.tensor([[200.0], [100.0]]),
+            'ISO': torch.tensor([[6400.0], [3200.0]]),
+        }
+        
+        output = model_with_cond.validation_step(batch, 0)
+        
+        assert 'val_loss' in output
+        # Should have real noisy input stored for metrics computation
+        assert 'img_noisy' in output
+    
+    def test_measurement_cond_doubles_input_channels(self, model_with_cond):
+        """Test that measurement conditioning doubles the U-Net input channels."""
+        # The internal model U-Net should have 8 input channels (4 x_t + 4 noisy)
+        assert model_with_cond.model.unet.in_ch == 8
+        # But output should still be 4
+        assert model_with_cond.model.unet.out_ch == 4
     
     def test_configure_optimizers(self, model):
         """Test optimizer configuration."""

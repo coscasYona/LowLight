@@ -106,7 +106,8 @@ def evaluate_sid(
             iso = batch['ISO'].to(device)
             
             with torch.no_grad():
-                denoised = model.model.sample(noisy, iso=iso, ratio=ratio)
+                cond_image = noisy if model.use_measurement_cond else None
+                denoised = model.model.sample(noisy, iso=iso, ratio=ratio, cond_image=cond_image)
                 denoised_corrected = illum_correct(denoised, clean)
             
             # Compute metrics
@@ -181,7 +182,8 @@ def evaluate_eld(
                 iso = torch.tensor([[batch['ISO']]], device=device, dtype=torch.float32)
                 
                 with torch.no_grad():
-                    denoised = model.model.sample(noisy, iso=iso, ratio=ratio)
+                    cond_image = noisy if model.use_measurement_cond else None
+                    denoised = model.model.sample(noisy, iso=iso, ratio=ratio, cond_image=cond_image)
                     denoised_corrected = illum_correct(denoised, clean)
                 
                 psnr = metrics_calc.compute_psnr(denoised_corrected, clean)

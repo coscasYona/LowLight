@@ -20,17 +20,19 @@ training:
   ema_decay: 0.9999
 
 # Early stopping
+# Note: You can monitor "val/psnr" (mode: max) for better image quality tracking
 early_stopping:
   enabled: true
   patience: 20
   min_delta: 1e-6
-  monitor: val/loss
+  monitor: val/loss  # Alternative: val/psnr with mode: max
   mode: min
 
 # Checkpointing
+# Note: You can monitor "val/psnr" (mode: max) for checkpoint selection based on denoising quality
 checkpoint:
   save_top_k: 3
-  monitor: val/loss
+  monitor: val/loss  # Alternative: val/psnr with mode: max
   mode: min
   save_last: true
   filename: "epoch_{epoch:04d}_val_loss_{val/loss:.4f}"

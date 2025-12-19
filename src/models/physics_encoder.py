@@ -5,7 +5,7 @@ Encodes camera parameters (ISO, ratio, exposure) into features
 that represent the noise characteristics based on the EMVA 1288 standard.
 """
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
@@ -48,7 +48,7 @@ class EMVA1288PhysicsEncoder(nn.Module):
         self, 
         iso: torch.Tensor, 
         ratio: torch.Tensor, 
-        camera_params: Optional[Dict] = None
+        camera_params: Optional[Union[Dict, Sequence[Dict]]] = None
     ) -> torch.Tensor:
         """
         Encode ISO and ratio into physics-based features.
@@ -56,13 +56,14 @@ class EMVA1288PhysicsEncoder(nn.Module):
         Args:
             iso: ISO sensitivity [B] or [B, 1]
             ratio: Exposure ratio [B] or [B, 1]
-            camera_params: Optional dict with K, sigGs, sigR, etc.
+            camera_params: Optional dict or list of dicts (per-sample) with K, sigGs, sigR, etc.
             
         Returns:
             Conditioning embedding [B, cond_dim]
         """
         batch_size = iso.size(0)
         device = iso.device
+        dtype = iso.dtype
         
         iso = torch.clamp(iso.view(batch_size, -1), min=1.0)
         ratio = torch.clamp(ratio.view(batch_size, -1), min=1.0)
@@ -72,16 +73,26 @@ class EMVA1288PhysicsEncoder(nn.Module):
         ratio_norm = ratio / 300.0
         
         if camera_params is not None:
-            # Use provided camera parameters
-            K = torch.tensor(
-                camera_params['K'], device=device, dtype=iso.dtype
-            ).expand(batch_size, 1)
-            sigGs = torch.tensor(
-                camera_params['sigGs'], device=device, dtype=iso.dtype
-            ).expand(batch_size, 1)
-            sigR = torch.tensor(
-                camera_params.get('sigR', 0.0), device=device, dtype=iso.dtype
-            ).expand(batch_size, 1)
+            # Handle per-sample (list) or single (dict) camera params
+            if isinstance(camera_params, (list, tuple)):
+                # Per-sample: extract values for each sample
+                K_vals = [p['K'] for p in camera_params]
+                sigGs_vals = [p['sigGs'] for p in camera_params]
+                sigR_vals = [p.get('sigR', 0.0) for p in camera_params]
+                K = torch.tensor(K_vals, device=device, dtype=dtype).view(batch_size, 1)
+                sigGs = torch.tensor(sigGs_vals, device=device, dtype=dtype).view(batch_size, 1)
+                sigR = torch.tensor(sigR_vals, device=device, dtype=dtype).view(batch_size, 1)
+            else:
+                # Single dict: broadcast to all samples
+                K = torch.tensor(
+                    camera_params['K'], device=device, dtype=dtype
+                ).expand(batch_size, 1)
+                sigGs = torch.tensor(
+                    camera_params['sigGs'], device=device, dtype=dtype
+                ).expand(batch_size, 1)
+                sigR = torch.tensor(
+                    camera_params.get('sigR', 0.0), device=device, dtype=dtype
+                ).expand(batch_size, 1)
         else:
             # Estimate from ISO (fallback - should use actual calibration)
             log_K = torch.log(iso_norm * 8.0 + 0.1)

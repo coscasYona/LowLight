@@ -5,7 +5,7 @@ Main diffusion model that combines the U-Net backbone with physics-based
 conditioning and noise generation following the EMVA 1288 standard.
 """
 
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple, Union, Sequence
 
 import torch
 import torch.nn as nn
@@ -52,12 +52,14 @@ class EMVA1288Diffusion(nn.Module):
         schedule_type: str = "linear",
         camera_type: str = "SonyA7S2",
         noise_code: str = "prq",
+        use_measurement_cond: bool = False,
     ):
         super().__init__()
         self.num_steps = max(1, num_steps)
         self.scheduler_type = scheduler
         self.camera_type = camera_type
         self.noise_code = noise_code
+        self.use_measurement_cond = use_measurement_cond
         
         # Time embedding
         self.time_embed = nn.Sequential(
@@ -144,6 +146,7 @@ class EMVA1288Diffusion(nn.Module):
         num_steps: Optional[int] = None,
         predict_noise: bool = False,
         camera_params: Optional[Dict] = None,
+        cond_image: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass.
@@ -163,8 +166,15 @@ class EMVA1288Diffusion(nn.Module):
         if predict_noise:
             if timesteps is None:
                 raise ValueError("Timesteps required for noise prediction.")
-            return self._predict_noise(x, timesteps, iso, ratio, camera_params)
-        return self.sample(x, iso=iso, ratio=ratio, num_steps=num_steps, camera_params=camera_params)
+            return self._predict_noise(x, timesteps, iso, ratio, camera_params, cond_image=cond_image)
+        return self.sample(
+            x,
+            iso=iso,
+            ratio=ratio,
+            num_steps=num_steps,
+            camera_params=camera_params,
+            cond_image=cond_image,
+        )
     
     def _prepare_iso_ratio(
         self, 
@@ -204,6 +214,7 @@ class EMVA1288Diffusion(nn.Module):
         iso: Optional[torch.Tensor],
         ratio: Optional[torch.Tensor],
         camera_params: Optional[Dict] = None,
+        cond_image: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Predict noise for given noisy input."""
         b = x.size(0)
@@ -211,6 +222,18 @@ class EMVA1288Diffusion(nn.Module):
         t_emb = self._time_embedding(timesteps)
         physics_emb = self.physics_encoder(iso, ratio, camera_params)
         emb = torch.cat([t_emb, physics_emb], dim=-1)
+        
+        if self.use_measurement_cond:
+            # When measurement conditioning is enabled, U-Net expects doubled channels
+            # Use x as fallback if cond_image is not provided (same as sample method)
+            if cond_image is None:
+                cond_image = x
+            if cond_image.shape[0] != b:
+                raise ValueError(f"cond_image batch mismatch: {cond_image.shape[0]} vs {b}")
+            if cond_image.shape[2:] != x.shape[2:]:
+                raise ValueError(f"cond_image spatial mismatch: {cond_image.shape[2:]} vs {x.shape[2:]}")
+            x = torch.cat([x, cond_image], dim=1)
+        
         return self.unet(x, emb)
     
     def generate_cmos_noise(
@@ -218,7 +241,7 @@ class EMVA1288Diffusion(nn.Module):
         clean_image: torch.Tensor, 
         iso: torch.Tensor,
         ratio: torch.Tensor,
-        camera_params: Optional[Dict] = None,
+        camera_params: Optional[Union[Dict, Sequence[Dict]]] = None,
     ) -> torch.Tensor:
         """
         Generate CMOS noise using EMVA 1288 model.
@@ -246,7 +269,11 @@ class EMVA1288Diffusion(nn.Module):
         noisy_images = []
         for i in range(batch_size):
             img = clean_image[i:i+1]
-            noisy = self.noise_model.generate_noise_torch(img, camera_params)
+            if isinstance(camera_params, (list, tuple)):
+                params_i = camera_params[i]
+            else:
+                params_i = camera_params
+            noisy = self.noise_model.generate_noise_torch(img, params_i)
             noisy_images.append(noisy)
         
         noisy_batch = torch.cat(noisy_images, dim=0)
@@ -265,7 +292,7 @@ class EMVA1288Diffusion(nn.Module):
         timesteps: torch.Tensor,
         iso: Optional[torch.Tensor] = None,
         ratio: Optional[torch.Tensor] = None,
-        camera_params: Optional[Dict] = None,
+        camera_params: Optional[Union[Dict, Sequence[Dict]]] = None,
         use_physics_noise: bool = True,
     ) -> torch.Tensor:
         """
@@ -317,6 +344,7 @@ class EMVA1288Diffusion(nn.Module):
         num_steps: Optional[int] = None,
         eta: float = 0.0,
         camera_params: Optional[Dict] = None,
+        cond_image: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Sample using DDPM or DDIM.
@@ -334,12 +362,14 @@ class EMVA1288Diffusion(nn.Module):
         """
         steps = min(num_steps or self.num_steps, self.num_steps)
         x = measurement
+        if cond_image is None:
+            cond_image = measurement
         
         use_ddim = self.scheduler_type == "ddim" or eta == 0.0
         
         for step in reversed(range(steps)):
             t = torch.full((x.size(0),), step, device=x.device, dtype=torch.long)
-            eps = self._predict_noise(x, t, iso, ratio, camera_params)
+            eps = self._predict_noise(x, t, iso, ratio, camera_params, cond_image=cond_image)
             
             if use_ddim:
                 prev_t = torch.clamp(t - 1, min=0)

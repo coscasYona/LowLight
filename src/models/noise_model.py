@@ -173,7 +173,7 @@ class EMVA1288NoiseModel:
         Generate noisy observation (NumPy version).
         
         Args:
-            clean: Clean image in [0, 1] range
+            clean: Clean image in [0, 1] range, shape [B, C, H, W] or [C, H, W]
             params: Noise parameters dictionary
             multi_frame_mean: Number of frames to average
             
@@ -181,6 +181,15 @@ class EMVA1288NoiseModel:
             Noisy image
         """
         p = params
+        
+        # Handle both 3D [C, H, W] and 4D [B, C, H, W] inputs
+        squeeze_batch = False
+        if clean.ndim == 3:
+            clean = clean[np.newaxis, ...]
+            squeeze_batch = True
+        
+        B, C, H, W = clean.shape
+        
         y = clean * (p['wp'] - p['bl']) / p['ratio']
         mfm = multi_frame_mean ** 0.5
         
@@ -192,7 +201,9 @@ class EMVA1288NoiseModel:
         
         # Shot noise (Poisson)
         if use_P:
-            noisy_shot = np.random.poisson(mfm * y / p['K']).astype(np.float32) * p['K'] / mfm
+            # Clamp to avoid negative values in Poisson
+            poisson_rate = np.maximum(mfm * y / p['K'], 1e-10)
+            noisy_shot = np.random.poisson(poisson_rate).astype(np.float32) * p['K'] / mfm
         else:
             noisy_shot = y + np.random.randn(*y.shape).astype(np.float32) * \
                 np.sqrt(np.maximum(y / p['K'], 1e-10)) * p['K'] / mfm
@@ -206,12 +217,14 @@ class EMVA1288NoiseModel:
         else:
             noisy_read = np.random.randn(*y.shape).astype(np.float32) * p['sigGs'] / mfm
         
-        # Row noise
-        noisy_row = np.random.randn(y.shape[-3], y.shape[-2], 1).astype(np.float32) * \
-            p.get('sigR', 0) / mfm if use_R else 0
+        # Row noise - per-sample shape [B, C, H, 1] to broadcast across width
+        if use_R and p.get('sigR', 0) > 0:
+            noisy_row = np.random.randn(B, C, H, 1).astype(np.float32) * p.get('sigR', 0) / mfm
+        else:
+            noisy_row = 0
         
-        # Quantization noise
-        noisy_q = np.random.uniform(-0.5, 0.5, size=y.shape) if use_Q else 0
+        # Quantization noise - uniform [-0.5, 0.5] matching torch implementation
+        noisy_q = np.random.uniform(-0.5, 0.5, size=y.shape).astype(np.float32) if use_Q else 0
         
         # Bias
         noisy_bias = p.get('bias', 0) if use_D else 0
@@ -220,6 +233,9 @@ class EMVA1288NoiseModel:
         z = (noisy_shot + noisy_read + noisy_row + noisy_q + noisy_bias) / (p['wp'] - p['bl'])
         z = np.clip(z, -p['bl'] / p['wp'], 1)
         z = z * p['ratio']
+        
+        if squeeze_batch:
+            z = z[0]
         
         return z.astype(np.float32)
     
@@ -242,6 +258,13 @@ class EMVA1288NoiseModel:
         """
         p = params
         device = clean.device
+        dtype = clean.dtype
+        
+        # Handle both 3D [C, H, W] and 4D [B, C, H, W] inputs
+        if clean.dim() == 3:
+            clean = clean.unsqueeze(0)
+        
+        B, C, H, W = clean.shape
         
         y = clean * (p['wp'] - p['bl']) / p['ratio']
         mfm = multi_frame_mean ** 0.5
@@ -253,28 +276,24 @@ class EMVA1288NoiseModel:
         
         # Shot noise (Poisson)
         if use_P:
-            noisy_shot = tdist.Poisson(mfm * y / p['K']).sample() * p['K'] / mfm
+            # Clamp to avoid negative values in Poisson
+            poisson_rate = torch.clamp(mfm * y / p['K'], min=1e-10)
+            noisy_shot = tdist.Poisson(poisson_rate).sample() * p['K'] / mfm
         else:
             noisy_shot = tdist.Normal(y, torch.sqrt(torch.clamp(y / p['K'], min=1e-10)) * p['K'] / mfm).sample()
         
         # Read noise (Gaussian)
-        noisy_read = tdist.Normal(
-            torch.zeros_like(y), 
-            p['sigGs'] / mfm
-        ).sample()
+        noisy_read = torch.randn_like(y) * (p['sigGs'] / mfm)
         
-        # Row noise
+        # Row noise - per-sample shape [B, C, H, 1] to broadcast across width
         if use_R and p.get('sigR', 0) > 0:
-            noisy_row = torch.randn(
-                y.shape[-3], y.shape[-2], 1, device=device
-            ) * p['sigR'] / mfm
+            noisy_row = torch.randn(B, C, H, 1, device=device, dtype=dtype) * p['sigR'] / mfm
         else:
             noisy_row = 0
         
-        # Quantization noise
+        # Quantization noise - uniform, matching numpy implementation (no extra scaling)
         if use_Q:
-            noisy_q = (torch.rand(y.shape, device=device) - 0.5) * \
-                p['q'] * (p['wp'] - p['bl'])
+            noisy_q = (torch.rand(y.shape, device=device, dtype=dtype) - 0.5)
         else:
             noisy_q = 0
         
