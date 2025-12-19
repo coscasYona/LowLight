@@ -47,7 +47,7 @@ elif command -v docker &> /dev/null; then
     echo ""
     
     docker run -d --gpus all \
-        --shm-size=127g \
+        --shm-size=16g \
         -p 6006:6006 \
         -v "${PROJECT_ROOT}:/workspace/LowLight" \
         -w /workspace/LowLight/LLD/Codes/Stg2_LLD_Noise_Model \

@@ -10,14 +10,6 @@ Based on: https://kmdouglass.github.io/posts/modeling-noise-for-image-simulation
 """
 
 import os
-
-if 'CUDA_VISIBLE_DEVICES' in os.environ:
-    print(f"Debugger set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}, overriding to use all GPUs")
-    
-# Set to use all GPUs explicitly (0,1,2,3)
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-
 import random
 import glob
 import re
@@ -37,10 +29,6 @@ import util.util as util
 from data_process.process import sample_params_max
 
 random.seed()
-
-# Debug: Check GPU visibility
-print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set (all GPUs visible)')}")
-print(f"PyTorch sees {torch.cuda.device_count()} GPU(s)")
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -189,7 +177,7 @@ def validate_epoch(dn_model, val_loader, criterion_mse, criterion_l1, compute_gr
             try:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-            except:
+            except Exception:
                 pass  # Ignore errors when trying to clear cache after CUDA error
             return None
         else:
@@ -202,7 +190,7 @@ def validate_epoch(dn_model, val_loader, criterion_mse, criterion_l1, compute_gr
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        except:
+        except Exception:
             pass  # Ignore errors when trying to clear cache
         return None
     
@@ -659,7 +647,7 @@ def main(args):
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        except:
+        except Exception:
             pass  # Continue even if cache clearing fails
         
         val_loss = validate_epoch(
@@ -726,7 +714,7 @@ def main(args):
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        except:
+        except Exception:
             pass  # Continue even if cache clearing fails
 
         # Save periodic checkpoints
@@ -748,7 +736,7 @@ def main(args):
             try:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-            except:
+            except Exception:
                 pass
             
             import stg2_denoise_test_SID
@@ -761,7 +749,7 @@ def main(args):
             try:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-            except:
+            except Exception:
                 pass
     
     # Final test evaluation with best model
@@ -786,7 +774,7 @@ def main(args):
         try:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        except:
+        except Exception:
             pass
         
         import stg2_denoise_test_SID

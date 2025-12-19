@@ -181,9 +181,30 @@ def write_loss(writer, prefix, avg_meters, iteration):
             os.path.join(prefix, key), meter, iteration)
 
 
-def log_training_images(writer, epoch, model, image_data, save_path=None, compute_metrics=False):
+def _raw_to_rgb(raw_4ch):
+    """Convert 4-channel RAW (RGGB) to 3-channel RGB for visualization.
+    
+    RGGB format: [R, G1, B, G2] -> RGB: [R, (G1+G2)/2, B]
     """
-    Log training images to TensorBoard and optionally save to disk.
+    import torch
+    if raw_4ch.dim() == 3:
+        raw_4ch = raw_4ch.unsqueeze(0)
+    B, C, H, W = raw_4ch.shape
+    if C == 4:
+        R = raw_4ch[:, 0:1, :, :]
+        G1 = raw_4ch[:, 1:2, :, :]
+        B_ch = raw_4ch[:, 2:3, :, :]
+        G2 = raw_4ch[:, 3:4, :, :]
+        G = (G1 + G2) / 2.0
+        rgb = torch.cat([R, G, B_ch], dim=1)
+    else:
+        rgb = raw_4ch
+    return rgb.squeeze(0) if rgb.shape[0] == 1 else rgb
+
+
+def log_images(writer, epoch, model, image_data, save_path=None, compute_metrics=False, prefix='Train'):
+    """
+    Log images to TensorBoard and optionally save to disk.
     
     Args:
         writer: TensorBoard SummaryWriter
@@ -197,8 +218,9 @@ def log_training_images(writer, epoch, model, image_data, save_path=None, comput
             - 'camera_params': (optional) Camera parameters dict for EMVA1288
             - 'num_steps': (optional) Number of sampling steps, default 50
             - 'eta': (optional) Sampling eta, default 0.0
-        save_path: (optional) Base path to save images. Images will be saved to {save_path}/images/
-        compute_metrics: (optional) Whether to compute and log PSNR/SNR metrics. Default False.
+        save_path: (optional) Base path to save images
+        compute_metrics: (optional) Whether to compute and log PSNR/SNR metrics
+        prefix: 'Train' or 'Validation' - determines TensorBoard naming and save directory
     """
     if image_data is None:
         return
@@ -272,33 +294,16 @@ def log_training_images(writer, epoch, model, image_data, save_path=None, comput
                     noisy=noisy_norm,
                     denoised=denoised_norm
                 )
-                log_metrics_to_tensorboard(writer, epoch, metrics, prefix='Train')
-                print_metrics_summary(metrics, prefix='Train')
+                log_metrics_to_tensorboard(writer, epoch, metrics, prefix=prefix)
+                print_metrics_summary(metrics, prefix=prefix)
             except Exception as e:
-                print(f"Warning: Failed to compute training metrics: {e}")
+                print(f"Warning: Failed to compute {prefix.lower()} metrics: {e}")
                 import traceback
                 traceback.print_exc()
         
-        # Convert 4-channel RAW (RGGB) to 3-channel RGB for visualization
-        # RGGB format: [R, G1, B, G2] -> RGB: [R, (G1+G2)/2, B]
-        def raw_to_rgb(raw_4ch):
-            if raw_4ch.dim() == 3:
-                raw_4ch = raw_4ch.unsqueeze(0)
-            B, C, H, W = raw_4ch.shape
-            if C == 4:
-                R = raw_4ch[:, 0:1, :, :]
-                G1 = raw_4ch[:, 1:2, :, :]
-                B_ch = raw_4ch[:, 2:3, :, :]
-                G2 = raw_4ch[:, 3:4, :, :]
-                G = (G1 + G2) / 2.0
-                rgb = torch.cat([R, G, B_ch], dim=1)
-            else:
-                rgb = raw_4ch
-            return rgb.squeeze(0) if rgb.shape[0] == 1 else rgb
-        
-        img_gt_rgb = raw_to_rgb(img_gt_norm)
-        noisy_rgb = raw_to_rgb(noisy_norm)
-        denoised_rgb = raw_to_rgb(denoised_norm)
+        img_gt_rgb = _raw_to_rgb(img_gt_norm)
+        noisy_rgb = _raw_to_rgb(noisy_norm)
+        denoised_rgb = _raw_to_rgb(denoised_norm)
         
         # Ensure all tensors have batch dimension for consistent concatenation
         if img_gt_rgb.dim() == 3:
@@ -309,200 +314,50 @@ def log_training_images(writer, epoch, model, image_data, save_path=None, comput
             denoised_rgb = denoised_rgb.unsqueeze(0)
         
         # Create grid: horizontally concatenate [clean | noisy | denoised] for each sample
-        # Each row will be one sample with three images side by side
-        image_grid = torch.cat([img_gt_rgb, noisy_rgb, denoised_rgb], dim=3)  # Concatenate along width
-        writer.add_images('Train/Images', image_grid, epoch, dataformats='NCHW')
+        image_grid = torch.cat([img_gt_rgb, noisy_rgb, denoised_rgb], dim=3)
+        writer.add_images(f'{prefix}/Images', image_grid, epoch, dataformats='NCHW')
         
         # Save images to disk if save_path is provided
         if save_path is not None:
-            images_dir = os.path.join(save_path, 'images')
+            subdir = 'val_images' if prefix == 'Validation' else 'images'
+            images_dir = os.path.join(save_path, subdir)
             os.makedirs(images_dir, exist_ok=True)
             
             B = img_gt_rgb.shape[0]
             for i in range(B):
-                # Convert tensors to numpy arrays [C, H, W] -> [H, W, C] and scale to [0, 255]
-                def tensor_to_numpy(img_tensor):
-                    img_np = img_tensor[i].cpu().clamp(0.0, 1.0).numpy()  # [C, H, W]
-                    img_np = np.transpose(img_np, (1, 2, 0))  # [H, W, C]
-                    img_np = (img_np * 255.0).astype(np.uint8)
-                    return img_np
+                img_np_gt = img_gt_rgb[i].cpu().clamp(0.0, 1.0).numpy()
+                img_np_gt = np.transpose(img_np_gt, (1, 2, 0))
+                img_np_gt = (img_np_gt * 255.0).astype(np.uint8)
                 
-                clean_img = tensor_to_numpy(img_gt_rgb)
-                noisy_img = tensor_to_numpy(noisy_rgb)
-                denoised_img = tensor_to_numpy(denoised_rgb)
+                img_np_noisy = noisy_rgb[i].cpu().clamp(0.0, 1.0).numpy()
+                img_np_noisy = np.transpose(img_np_noisy, (1, 2, 0))
+                img_np_noisy = (img_np_noisy * 255.0).astype(np.uint8)
+                
+                img_np_denoised = denoised_rgb[i].cpu().clamp(0.0, 1.0).numpy()
+                img_np_denoised = np.transpose(img_np_denoised, (1, 2, 0))
+                img_np_denoised = (img_np_denoised * 255.0).astype(np.uint8)
                 
                 # Save as BMP files
-                base_filename = f"epoch_{epoch:04d}_sample_{i:03d}"
-                clean_path = os.path.join(images_dir, f"{base_filename}_clean.bmp")
-                noisy_path = os.path.join(images_dir, f"{base_filename}_noisy.bmp")
-                denoised_path = os.path.join(images_dir, f"{base_filename}_denoised.bmp")
-                
-                Image.fromarray(clean_img, mode='RGB').save(clean_path)
-                Image.fromarray(noisy_img, mode='RGB').save(noisy_path)
-                Image.fromarray(denoised_img, mode='RGB').save(denoised_path)
+                file_prefix = 'val_' if prefix == 'Validation' else ''
+                base_filename = f"{file_prefix}epoch_{epoch:04d}_sample_{i:03d}"
+                Image.fromarray(img_np_gt, mode='RGB').save(
+                    os.path.join(images_dir, f"{base_filename}_clean.bmp"))
+                Image.fromarray(img_np_noisy, mode='RGB').save(
+                    os.path.join(images_dir, f"{base_filename}_noisy.bmp"))
+                Image.fromarray(img_np_denoised, mode='RGB').save(
+                    os.path.join(images_dir, f"{base_filename}_denoised.bmp"))
     
     model.train()
 
 
+def log_training_images(writer, epoch, model, image_data, save_path=None, compute_metrics=False):
+    """Log training images to TensorBoard. Wrapper for backward compatibility."""
+    return log_images(writer, epoch, model, image_data, save_path, compute_metrics, prefix='Train')
+
+
 def log_validation_images(writer, epoch, model, image_data, save_path=None, compute_metrics=True):
-    """
-    Log validation images to TensorBoard and optionally save to disk.
-    
-    Args:
-        writer: TensorBoard SummaryWriter
-        epoch: Current epoch number
-        model: Model to use for denoising (will be set to eval mode)
-        image_data: Dict containing:
-            - 'img_gt': Ground truth images [B, C, H, W]
-            - 'noisy_state': Noisy input images [B, C, H, W]
-            - 'iso': ISO values [B]
-            - 'ratio': Ratio values [B]
-            - 'camera_params': (optional) Camera parameters dict for EMVA1288
-            - 'num_steps': (optional) Number of sampling steps, default 50
-            - 'eta': (optional) Sampling eta, default 0.0
-        save_path: (optional) Base path to save images. Images will be saved to {save_path}/val_images/
-        compute_metrics: (optional) Whether to compute and log PSNR/SNR metrics. Default True.
-    """
-    if image_data is None:
-        return
-    
-    import torch
-    
-    model.eval()
-    with torch.no_grad():
-        base_model = model.module if hasattr(model, 'module') else model
-        
-        # Get sampling parameters - use model's num_steps as default to avoid index out of bounds
-        default_num_steps = base_model.num_steps if hasattr(base_model, 'num_steps') else 50
-        num_steps = image_data.get('num_steps', default_num_steps)
-        # Ensure num_steps doesn't exceed model's capacity
-        if hasattr(base_model, 'num_steps'):
-            num_steps = min(num_steps, base_model.num_steps)
-        eta = image_data.get('eta', 0.0)
-        camera_params = image_data.get('camera_params', None)
-        
-        # Validate and fix iso/ratio values before sampling
-        iso = image_data['iso']
-        ratio = image_data['ratio']
-        
-        # Replace NaN/Inf with safe defaults
-        iso = torch.where(torch.isfinite(iso), iso, torch.ones_like(iso) * 6400.0)
-        ratio = torch.where(torch.isfinite(ratio), ratio, torch.ones_like(ratio) * 200.0)
-        # Clamp to valid ranges
-        iso = torch.clamp(iso, min=1.0, max=1e6)
-        ratio = torch.clamp(ratio, min=1.0, max=1e6)
-        
-        # Generate denoised images
-        sample_kwargs = {
-            'iso': iso,
-            'ratio': ratio,
-            'num_steps': num_steps,
-            'eta': eta
-        }
-        if camera_params is not None:
-            sample_kwargs['camera_params'] = camera_params
-        
-        denoised = base_model.sample(
-            image_data['noisy_state'],
-            **sample_kwargs
-        )
-        
-        # Normalize to [0, 1] for visualization (handle both [-1,1] and [0,1] ranges)
-        img_gt = image_data['img_gt']
-        noisy_state = image_data['noisy_state']
-        
-        img_gt_min = img_gt.min()
-        if img_gt_min < 0:
-            img_gt_norm = torch.clamp((img_gt + 1.0) / 2.0, 0.0, 1.0)
-        else:
-            img_gt_norm = torch.clamp(img_gt, 0.0, 1.0)
-        
-        noisy_min = noisy_state.min()
-        if noisy_min < 0:
-            noisy_norm = torch.clamp((noisy_state + 1.0) / 2.0, 0.0, 1.0)
-        else:
-            noisy_norm = torch.clamp(noisy_state, 0.0, 1.0)
-        
-        denoised_norm = torch.clamp(denoised, 0.0, 1.0)
-        
-        # Compute and log PSNR/SNR metrics if requested
-        if compute_metrics and writer is not None:
-            try:
-                from util.metrics import ImageQualityMetrics, log_metrics_to_tensorboard, print_metrics_summary
-                metrics_calculator = ImageQualityMetrics(device=img_gt_norm.device, data_range=1.0)
-                metrics = metrics_calculator.compute_all_metrics(
-                    clean=img_gt_norm,
-                    noisy=noisy_norm,
-                    denoised=denoised_norm
-                )
-                log_metrics_to_tensorboard(writer, epoch, metrics, prefix='Validation')
-                print_metrics_summary(metrics, prefix='Validation')
-            except Exception as e:
-                print(f"Warning: Failed to compute metrics: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        # Convert 4-channel RAW (RGGB) to 3-channel RGB for visualization
-        # RGGB format: [R, G1, B, G2] -> RGB: [R, (G1+G2)/2, B]
-        def raw_to_rgb(raw_4ch):
-            if raw_4ch.dim() == 3:
-                raw_4ch = raw_4ch.unsqueeze(0)
-            B, C, H, W = raw_4ch.shape
-            if C == 4:
-                R = raw_4ch[:, 0:1, :, :]
-                G1 = raw_4ch[:, 1:2, :, :]
-                B_ch = raw_4ch[:, 2:3, :, :]
-                G2 = raw_4ch[:, 3:4, :, :]
-                G = (G1 + G2) / 2.0
-                rgb = torch.cat([R, G, B_ch], dim=1)
-            else:
-                rgb = raw_4ch
-            return rgb.squeeze(0) if rgb.shape[0] == 1 else rgb
-        
-        img_gt_rgb = raw_to_rgb(img_gt_norm)
-        noisy_rgb = raw_to_rgb(noisy_norm)
-        denoised_rgb = raw_to_rgb(denoised_norm)
-        
-        # Ensure all tensors have batch dimension for consistent concatenation
-        if img_gt_rgb.dim() == 3:
-            img_gt_rgb = img_gt_rgb.unsqueeze(0)
-        if noisy_rgb.dim() == 3:
-            noisy_rgb = noisy_rgb.unsqueeze(0)
-        if denoised_rgb.dim() == 3:
-            denoised_rgb = denoised_rgb.unsqueeze(0)
-        
-        # Create grid: horizontally concatenate [clean | noisy | denoised] for each sample
-        # Each row will be one sample with three images side by side
-        image_grid = torch.cat([img_gt_rgb, noisy_rgb, denoised_rgb], dim=3)  # Concatenate along width
-        writer.add_images('Validation/Images', image_grid, epoch, dataformats='NCHW')
-        
-        # Save images to disk if save_path is provided
-        if save_path is not None:
-            images_dir = os.path.join(save_path, 'val_images')
-            os.makedirs(images_dir, exist_ok=True)
-            
-            B = img_gt_rgb.shape[0]
-            for i in range(B):
-                # Convert tensors to numpy arrays [C, H, W] -> [H, W, C] and scale to [0, 255]
-                def tensor_to_numpy(img_tensor):
-                    img_np = img_tensor[i].cpu().clamp(0.0, 1.0).numpy()  # [C, H, W]
-                    img_np = np.transpose(img_np, (1, 2, 0))  # [H, W, C]
-                    img_np = (img_np * 255.0).astype(np.uint8)
-                    return img_np
-                
-                clean_img = tensor_to_numpy(img_gt_rgb)
-                noisy_img = tensor_to_numpy(noisy_rgb)
-                denoised_img = tensor_to_numpy(denoised_rgb)
-                
-                # Save as BMP files
-                base_filename = f"val_epoch_{epoch:04d}_sample_{i:03d}"
-                clean_path = os.path.join(images_dir, f"{base_filename}_clean.bmp")
-                noisy_path = os.path.join(images_dir, f"{base_filename}_noisy.bmp")
-                denoised_path = os.path.join(images_dir, f"{base_filename}_denoised.bmp")
-                
-                Image.fromarray(clean_img, mode='RGB').save(clean_path)
-                Image.fromarray(noisy_img, mode='RGB').save(noisy_path)
-                Image.fromarray(denoised_img, mode='RGB').save(denoised_path)
+    """Log validation images to TensorBoard. Wrapper for backward compatibility."""
+    return log_images(writer, epoch, model, image_data, save_path, compute_metrics, prefix='Validation')
 
 
 """progress bar"""
