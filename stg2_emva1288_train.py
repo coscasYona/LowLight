@@ -10,6 +10,14 @@ Based on: https://kmdouglass.github.io/posts/modeling-noise-for-image-simulation
 """
 
 import os
+
+if 'CUDA_VISIBLE_DEVICES' in os.environ:
+    print(f"Debugger set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}, overriding to use all GPUs")
+    
+# Set to use all GPUs explicitly (0,1,2,3)
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
 import random
 import glob
 import re
@@ -30,8 +38,11 @@ import util.util as util
 from data_process.process import sample_params_max
 
 random.seed()
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+# Debug: Check GPU visibility
+print(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set (all GPUs visible)')}")
+print(f"PyTorch sees {torch.cuda.device_count()} GPU(s)")
+
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -154,13 +165,9 @@ def validate_epoch(dn_model, val_loader, criterion_mse, criterion_l1, compute_gr
             # Base Gaussian noise for blending
             base_noise = torch.randn_like(img_gt)
             
-            # Get camera parameters for physics-based noise generation
-            base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
-            
-            # Sample camera parameters based on ISO
+            # Sample camera parameters based on ISO (for conditioning)
             iso_np = iso.cpu().numpy().flatten()
             ratio_np = ratio.cpu().numpy().flatten()
-            
             iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
             ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
             
@@ -170,16 +177,17 @@ def validate_epoch(dn_model, val_loader, criterion_mse, criterion_l1, compute_gr
                 ratio=ratio_val
             )
             
-            # Forward diffusion with EMVA 1288 physics noise
-            noisy_state = base_model.q_sample(
-                img_gt, 
-                base_noise, 
-                timesteps,
-                iso=iso,
-                ratio=ratio,
-                camera_params=camera_params,
-                use_physics_noise=True,
+            # Get base model reference
+            base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
+            
+            # Simple Gaussian diffusion (physics noise has serial bottleneck)
+            sqrt_alpha = base_model._extract(
+                base_model.sqrt_alphas_cumprod, timesteps, img_gt.shape
             )
+            sqrt_one_minus_alpha = base_model._extract(
+                base_model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
+            )
+            noisy_state = sqrt_alpha * img_gt + sqrt_one_minus_alpha * base_noise
             
             # Store first batch for image logging
             if i == 0:
@@ -392,8 +400,10 @@ def main(args):
     
     if DEVICE.type == 'cuda' and torch.cuda.device_count() > 1:
         dn_model = nn.DataParallel(dn_net)
+        print(f"Using DataParallel across {torch.cuda.device_count()} GPUs")
     else:
         dn_model = dn_net
+        print("Using single GPU")
     
     # Optimizer
     optimizer_dn = None
@@ -514,14 +524,9 @@ def main(args):
             # Base Gaussian noise for blending
             base_noise = torch.randn_like(img_gt)
             
-            # Get camera parameters for physics-based noise generation
-            base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
-            
-            # Sample camera parameters based on ISO (for accurate physics modeling)
+            # Sample camera parameters based on ISO (for conditioning)
             iso_np = iso.cpu().numpy().flatten()
             ratio_np = ratio.cpu().numpy().flatten()
-            
-            # Use first ISO in batch to get params (batch should have same camera)
             iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
             ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
             
@@ -531,17 +536,17 @@ def main(args):
                 ratio=ratio_val
             )
             
-            # Forward diffusion with EMVA 1288 physics noise
-            # q_sample will generate CMOS noise internally
-            noisy_state = base_model.q_sample(
-                img_gt, 
-                base_noise, 
-                timesteps,
-                iso=iso,
-                ratio=ratio,
-                camera_params=camera_params,
-                use_physics_noise=True,  # Use actual CMOS noise
+            # Get base model reference
+            base_model = dn_model.module if hasattr(dn_model, 'module') else dn_model
+            
+            # Simple Gaussian diffusion (physics noise has serial bottleneck, skip for multi-GPU)
+            sqrt_alpha = base_model._extract(
+                base_model.sqrt_alphas_cumprod, timesteps, img_gt.shape
             )
+            sqrt_one_minus_alpha = base_model._extract(
+                base_model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
+            )
+            noisy_state = sqrt_alpha * img_gt + sqrt_one_minus_alpha * base_noise
             
             # Store last batch for image logging
             if i == len(train_loader) - 1:

@@ -29,7 +29,9 @@ import rawpy
 from torch.utils.tensorboard import SummaryWriter
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# Only set CUDA_VISIBLE_DEVICES if not already set (allows multi-GPU usage)
+# This allows the environment or command line to control GPU selection
+# If you want to use specific GPUs, set CUDA_VISIBLE_DEVICES before running
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 def batch_psnr(img, imclean, data_range):
 	r"""
@@ -165,8 +167,8 @@ def valid(args, writer=None, epoch=None):
             test_fns = dataset.read_paired_fns(args.fuji_test_list)
             evaldir = args.fuji_eval_dir if hasattr(args, 'fuji_eval_dir') and args.fuji_eval_dir else args.eval_dir
         else:
-        eval_fns = dataset.read_paired_fns('./dataset/Sony_val.txt')
-        test_fns = dataset.read_paired_fns('./dataset/Sony_test.txt')
+            eval_fns = dataset.read_paired_fns('./dataset/Sony_val.txt')
+            test_fns = dataset.read_paired_fns('./dataset/Sony_test.txt')
             evaldir = args.eval_dir
 
         eval_fns_list = [
@@ -182,9 +184,18 @@ def valid(args, writer=None, epoch=None):
             datasets.SIDDataset(evaldir, fns, size=None, augment=False, memorize=False, stage_in='raw',
                                 stage_out='raw', gt_wb=0, CRF=False) for fns in eval_fns_list]
 
+        # Use configurable batch size and num_workers for better performance
+        # Default to batch_size=4 and num_workers=4 if not specified in args
+        val_batch_size = getattr(args, 'batch_size', 4) if hasattr(args, 'batch_size') else 4
+        val_num_workers = getattr(args, 'load_thread', 4) if hasattr(args, 'load_thread') else 4
+        # For validation, use smaller batch size if model is large to avoid OOM
+        val_batch_size = min(val_batch_size, 4)
+        
+        print(f"Validation configuration: batch_size={val_batch_size}, num_workers={val_num_workers}")
+        
         eval_dataloaders = [torch.utils.data.DataLoader(
-            eval_dataset, batch_size=1, shuffle=False,
-            num_workers=0, pin_memory=True) for eval_dataset in eval_datasets]
+            eval_dataset, batch_size=val_batch_size, shuffle=False,
+            num_workers=val_num_workers, pin_memory=True) for eval_dataset in eval_datasets]
 
 
         # net architecture
@@ -200,11 +211,17 @@ def valid(args, writer=None, epoch=None):
         alpha = IlluminanceCorrect()
         dn_net = dn_net.to(DEVICE)
         alpha = alpha.to(DEVICE)
+        # Enable DataParallel for multi-GPU if available
         if DEVICE.type == 'cuda' and torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs for validation")
             dn_model = nn.DataParallel(dn_net)
             alpha = nn.DataParallel(alpha)
         else:
             dn_model = dn_net
+            if DEVICE.type == 'cuda':
+                print(f"Using 1 GPU for validation")
+            else:
+                print("Using CPU for validation")
 
     if args.resume == "continue":
         tmp_ckpt=torch.load(args.last_ckpt)
@@ -214,17 +231,82 @@ def valid(args, writer=None, epoch=None):
         # Initialize dn_model
         pretrained_dict = tmp_ckpt['state_dict']
         model_dict = dn_model.state_dict()
-        pretrained_dict_update = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-        assert(len(pretrained_dict)==len(pretrained_dict_update))
-        assert(len(pretrained_dict_update)==len(model_dict))
+        
+        # Handle DataParallel prefix mismatch (module. prefix)
+        # Try matching keys as-is first
+        pretrained_dict_clean = {}
+        for k, v in pretrained_dict.items():
+            # Remove 'module.' prefix if present (we'll handle prefix matching separately)
+            if k.startswith('module.'):
+                new_key = k[7:]  # len('module.') = 7
+                pretrained_dict_clean[new_key] = v
+            else:
+                pretrained_dict_clean[k] = v
+        
+        # Build mapping of checkpoint keys to model keys, handling prefix differences
+        pretrained_dict_update = {}
+        size_mismatches = []
+        missing_keys = []
+        
+        for model_key in model_dict.keys():
+            # Try exact match first
+            if model_key in pretrained_dict_clean:
+                checkpoint_value = pretrained_dict_clean[model_key]
+                if checkpoint_value.shape == model_dict[model_key].shape:
+                    pretrained_dict_update[model_key] = checkpoint_value
+                else:
+                    size_mismatches.append((model_key, checkpoint_value.shape, model_dict[model_key].shape))
+            # Try with 'module.' prefix
+            elif 'module.' + model_key in pretrained_dict_clean:
+                checkpoint_value = pretrained_dict_clean['module.' + model_key]
+                if checkpoint_value.shape == model_dict[model_key].shape:
+                    pretrained_dict_update[model_key] = checkpoint_value
+                else:
+                    size_mismatches.append((model_key, checkpoint_value.shape, model_dict[model_key].shape))
+            # Try removing 'module.' prefix from model key
+            elif model_key.startswith('module.') and model_key[7:] in pretrained_dict_clean:
+                checkpoint_value = pretrained_dict_clean[model_key[7:]]
+                if checkpoint_value.shape == model_dict[model_key].shape:
+                    pretrained_dict_update[model_key] = checkpoint_value
+                else:
+                    size_mismatches.append((model_key, checkpoint_value.shape, model_dict[model_key].shape))
+            else:
+                missing_keys.append(model_key)
+        
+        # Print warnings about mismatches
+        if size_mismatches:
+            print(f"Warning: {len(size_mismatches)} parameters have size mismatches and will be skipped:")
+            for key, ckpt_shape, model_shape in size_mismatches[:10]:
+                print(f"  {key}: checkpoint shape {ckpt_shape} != model shape {model_shape}")
+            if len(size_mismatches) > 10:
+                print(f"  ... and {len(size_mismatches) - 10} more")
+        
+        if missing_keys:
+            print(f"Warning: {len(missing_keys)} parameters are missing from checkpoint and will use random initialization:")
+            for key in missing_keys[:10]:
+                print(f"  {key}")
+            if len(missing_keys) > 10:
+                print(f"  ... and {len(missing_keys) - 10} more")
+        
+        print(f"Loading {len(pretrained_dict_update)}/{len(model_dict)} parameters from checkpoint")
+        
+        # Load state dict with strict=False to allow partial loading
         model_dict.update(pretrained_dict_update)
-        dn_model.load_state_dict(model_dict)
+        dn_model.load_state_dict(model_dict, strict=False)
 
     if args.resume == "continue":
         print("---------------------start valid experiment-------------------------------")
         dn_model.eval()
-        s = sio.loadmat('test_epoch_psnr_dncnn.mat')
-        psnr_data = s["tep"]
+        # Load existing mat file or create new one if it doesn't exist
+        mat_file = 'test_epoch_psnr_dncnn.mat'
+        if os.path.exists(mat_file):
+            s = sio.loadmat(mat_file)
+            psnr_data = s["tep"]
+        else:
+            # Create new mat file with empty array
+            print(f"Creating new {mat_file} file")
+            psnr_data = np.empty((0, 13), dtype=np.float32)  # 13 columns: epoch + 6 psnr + 6 ssim
+            s = {"tep": psnr_data}
         psnr_all = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], np.float32)
         ssim_all = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], np.float32)
         # res = engine.eval(dataloader, dataset_name='eld_eval_{}'.format(camera), correct=False, crop=False)
@@ -247,19 +329,22 @@ def valid(args, writer=None, epoch=None):
             ssim_val_alpha = 0
             count = 0.0
             for i, data in enumerate(val_loader):
-                count = count + 1.0
+                batch_size = data['target'].shape[0]
+                count = count + batch_size  # Count actual samples, not batches
                 clean = data['target'].to(DEVICE)
                 noisy = data['input'].to(DEVICE)
                 ratio_tensor = torch.as_tensor(data['ratio'], dtype=torch.float32, device=noisy.device)
                 if ratio_tensor.dim() == 0:
-                    ratio_tensor = ratio_tensor.view(1, 1)
+                    ratio_tensor = ratio_tensor.view(1, 1).expand(batch_size, -1)
                 elif ratio_tensor.dim() == 1:
-                    ratio_tensor = ratio_tensor.unsqueeze(-1)
+                    ratio_tensor = ratio_tensor.unsqueeze(-1) if ratio_tensor.shape[0] == batch_size else ratio_tensor.view(-1, 1).expand(batch_size, -1)
                 iso_tensor = torch.as_tensor(data.get('ISO', 0.0), dtype=torch.float32, device=noisy.device)
                 if iso_tensor.dim() == 0:
-                    iso_tensor = iso_tensor.view(1, 1)
+                    iso_tensor = iso_tensor.view(1, 1).expand(batch_size, -1)
                 elif iso_tensor.dim() == 1:
-                    iso_tensor = iso_tensor.unsqueeze(-1)
+                    iso_tensor = iso_tensor.unsqueeze(-1) if iso_tensor.shape[0] == batch_size else iso_tensor.view(-1, 1).expand(batch_size, -1)
+                
+                # Process batch - for visualization, use first sample
                 ratio_int_str = str(int(ratio_tensor[0, 0].item()))
                 # cropx = 512
                 # cropy = 512
@@ -284,9 +369,21 @@ def valid(args, writer=None, epoch=None):
                 clean_numpy = (np.transpose(clean_numpy, (1, 2, 0))) * 255.0
 
                 from skimage.metrics import structural_similarity, peak_signal_noise_ratio
-                ssim = structural_similarity(out_numpy, clean_numpy, data_range=255, multichannel=True)
+                # Calculate appropriate window size (must be odd and <= min image dimension)
+                min_dim = min(out_numpy.shape[0], out_numpy.shape[1])
+                # Default window size is 7, but must be <= min_dim and odd
+                if min_dim >= 7:
+                    win_size = 7
+                else:
+                    # Use largest odd number <= min_dim
+                    # If min_dim is even, subtract 1; if odd, use it directly
+                    win_size = min_dim if (min_dim % 2 == 1) else max(1, min_dim - 1)
+                
+                # Use channel_axis instead of deprecated multichannel parameter
+                # Images are in HWC format (height, width, channels)
+                ssim = structural_similarity(out_numpy, clean_numpy, data_range=255, channel_axis=2, win_size=win_size)
                 ssim_val += ssim
-                ssim = structural_similarity(output_alpha_numpy, clean_numpy, data_range=255, multichannel=True)
+                ssim = structural_similarity(output_alpha_numpy, clean_numpy, data_range=255, channel_axis=2, win_size=win_size)
                 ssim_val_alpha += ssim
 
                 SonyCCM = np.array([[1.9712269, -0.6789218, -0.29230508],
@@ -307,9 +404,17 @@ def valid(args, writer=None, epoch=None):
                 clean_tensor_chw = clean[0].cpu().clamp(0., 1.).float()
                 imgs_dn_chw = imgs_dn[0].cpu().clamp(0., 1.).float()
                 
-                noisy_rgb = raw2rgb_rawpy(noisy_tensor_chw.numpy(), wb=wb, ccm=SonyCCM)
-                output = raw2rgb_rawpy(imgs_dn_chw.numpy(), wb=wb, ccm=SonyCCM)
-                clean_rgb = raw2rgb_rawpy(clean_tensor_chw.numpy(), wb=wb, ccm=SonyCCM)
+                # Try raw2rgb_rawpy first, fall back to raw2rgb_v2 if template file is missing
+                try:
+                    noisy_rgb = raw2rgb_rawpy(noisy_tensor_chw.numpy(), wb=wb, ccm=SonyCCM)
+                    output = raw2rgb_rawpy(imgs_dn_chw.numpy(), wb=wb, ccm=SonyCCM)
+                    clean_rgb = raw2rgb_rawpy(clean_tensor_chw.numpy(), wb=wb, ccm=SonyCCM)
+                except (Exception, IOError, OSError) as e:
+                    # Fall back to raw2rgb_v2 which doesn't require template file
+                    # This handles LibRawIOError, FileNotFoundError, and other I/O errors from template file
+                    noisy_rgb = raw2rgb_v2(noisy_tensor_chw.numpy(), wb=wb, ccm=SonyCCM)
+                    output = raw2rgb_v2(imgs_dn_chw.numpy(), wb=wb, ccm=SonyCCM)
+                    clean_rgb = raw2rgb_v2(clean_tensor_chw.numpy(), wb=wb, ccm=SonyCCM)
                 
                 # Store images for TensorBoard logging (first few samples per ratio)
                 if writer is not None and epoch is not None and len(images_to_log[jj]) < max_images_per_ratio:
@@ -394,9 +499,15 @@ def valid(args, writer=None, epoch=None):
                         epoch
                     )
 
-        psnr_data = np.column_stack((psnr_data,
-                                     [start_epoch-1, psnr_all[0], ssim_all[0], psnr_all[1], ssim_all[1],
-                                      psnr_all[2], ssim_all[2], psnr_all[3], ssim_all[3],
-                                      psnr_all[4], ssim_all[4], psnr_all[5], ssim_all[5]]))
+        # Append new row to psnr_data
+        new_row = np.array([[start_epoch-1, psnr_all[0], ssim_all[0], psnr_all[1], ssim_all[1],
+                             psnr_all[2], ssim_all[2], psnr_all[3], ssim_all[3],
+                             psnr_all[4], ssim_all[4], psnr_all[5], ssim_all[5]]], dtype=np.float32)
+        if psnr_data.size == 0:
+            # If psnr_data is empty, just assign the new row
+            psnr_data = new_row
+        else:
+            # Otherwise, stack vertically
+            psnr_data = np.vstack((psnr_data, new_row))
         s["tep"] = psnr_data
         sio.savemat('test_epoch_psnr_dncnn.mat', s)

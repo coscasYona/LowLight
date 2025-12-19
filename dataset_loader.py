@@ -9,8 +9,8 @@ import random
 import torch.nn as nn
 import natsort
 import rawpy
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 class SID_Dataset_Denoise_raw(Dataset):
     def __init__(self, dataset_dir, patchsize=None, train_flag = True):
         super(SID_Dataset_Denoise_raw, self).__init__()

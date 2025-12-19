@@ -17,7 +17,6 @@ from stg2_denoise_options import opt
 from net.UNetSeeInDark import Net
 from torch.utils.tensorboard import SummaryWriter
 import util.util as util
-import time
 
 random.seed()
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -220,8 +219,6 @@ def main(args):
             img_gt = data['clean'].cuda()
             ratio = data['ratio'].cuda()
             iso = data['ISO'].cuda()
-            gpu_start = time.time()
-
             optimizer_dn.zero_grad()
 
             batch, _, _, _ = img_gt.size()
@@ -257,8 +254,6 @@ def main(args):
             loss = criterion(pred_noise, noise)
             loss.backward()
             optimizer_dn.step()
-            gpu_end = time.time()
-            print(f"GPU time: {gpu_end - gpu_start} seconds")
             i = i + 1
             
             # Log training metrics to TensorBoard
@@ -280,7 +275,7 @@ def main(args):
                     total_norm = total_norm ** (1. / 2)
                     writer.add_scalar('Train/GradientNorm', total_norm, global_step)
             
-            print("Epoch:[{}/{}] Batch: [{}/{}] loss = {:.4f} GPU time: {:.4f} seconds".format(epoch, args.epoch, i, total_step, loss_value, gpu_end - gpu_start))
+            print("Epoch:[{}/{}] Batch: [{}/{}] loss = {:.4f}".format(epoch, args.epoch, i, total_step, loss_value))
             global_step += 1
         
         # Log epoch-level average loss

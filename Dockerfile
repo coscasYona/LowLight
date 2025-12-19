@@ -42,6 +42,19 @@ RUN pip uninstall -y opencv opencv-python opencv-python-headless opencv-contrib-
 # Install debugpy for remote debugging support
 RUN pip install --no-cache-dir debugpy
 
+# Pre-install VS Code Server to avoid download issues with firewall
+# The vscode-server tarball should be downloaded on the host and placed in the build context
+# We extract it to a temporary location and let VS Code find it
+COPY .vscode-server.tar.gz /tmp/vscode-server.tar.gz
+RUN mkdir -p /tmp/vscode-server-tmp && \
+    tar -xzf /tmp/vscode-server.tar.gz -C /tmp/vscode-server-tmp --strip-components=1 && \
+    COMMIT_ID=$(cat /tmp/vscode-server-tmp/product.json | grep -o '"commit": "[^"]*"' | cut -d'"' -f4) && \
+    mkdir -p /root/.vscode-server/bin/${COMMIT_ID} && \
+    mv /tmp/vscode-server-tmp/* /root/.vscode-server/bin/${COMMIT_ID}/ && \
+    touch /root/.vscode-server/bin/${COMMIT_ID}/0 && \
+    rm -rf /tmp/vscode-server.tar.gz /tmp/vscode-server-tmp && \
+    echo "Installed VS Code Server commit: ${COMMIT_ID}"
+
 # Expose ports for TensorBoard and debugger
 EXPOSE 6006 5678
 
