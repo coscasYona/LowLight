@@ -1,0 +1,24 @@
+# Simple UNet model configuration (without EMVA 1288 physics)
+
+# Model architecture
+in_channels: 4
+out_channels: 4
+base_channels: 64
+channel_mults: [1, 2, 4, 8]
+
+# Diffusion settings
+num_steps: 50
+time_embed_dim: 128
+cond_embed_dim: 64
+
+# Attention
+attn_type: linear
+
+# Scheduler
+scheduler: ddpm
+schedule_type: linear
+
+# No physics-based noise
+camera_type: null
+noise_code: null
+

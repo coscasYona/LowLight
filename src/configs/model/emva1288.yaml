@@ -1,0 +1,26 @@
+# EMVA 1288 Physics-Guided Diffusion Model Configuration
+
+# Model architecture
+in_channels: 4
+out_channels: 4
+base_channels: 32
+channel_mults: [1, 2, 4]
+
+# Diffusion settings
+num_steps: 4
+time_embed_dim: 64
+cond_embed_dim: 64
+
+# Attention type: "linear" (O(n) memory), "channel" (most efficient)
+attn_type: linear
+
+# Scheduler: "ddpm" (stochastic), "ddim" (deterministic, faster)
+scheduler: ddpm
+
+# Noise schedule: "linear" or "cosine"
+schedule_type: linear
+
+# EMVA 1288 noise model settings
+camera_type: SonyA7S2
+noise_code: prq  # p=Poisson shot, r=row, q=quantization
+

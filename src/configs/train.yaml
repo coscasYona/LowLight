@@ -1,0 +1,58 @@
+# EMVA 1288 Physics-Guided Diffusion Training Configuration
+# Main training config - other configs are merged via defaults
+
+defaults:
+  - model: emva1288
+  - data: sid
+  - _self_
+
+# Training hyperparameters
+training:
+  epochs: 200
+  batch_size: 1
+  learning_rate: 1e-4
+  l1_weight: 0.8
+  gradient_weight: 0.1
+  loss_scale: 10.0
+  use_grad_clip: false
+  grad_clip_max: 1.0
+  use_ema: false
+  ema_decay: 0.9999
+
+# Early stopping
+early_stopping:
+  enabled: true
+  patience: 20
+  min_delta: 1e-6
+  monitor: val/loss
+  mode: min
+
+# Checkpointing
+checkpoint:
+  save_top_k: 3
+  monitor: val/loss
+  mode: min
+  save_last: true
+  filename: "epoch_{epoch:04d}_val_loss_{val/loss:.4f}"
+
+# Logging
+logging:
+  log_every_n_steps: 50
+  image_log_every_n_epochs: 1
+  num_sample_images: 4
+
+# Hardware
+hardware:
+  accelerator: auto
+  devices: auto
+  precision: 32  # Use 16-mixed for faster training with mixed precision
+  num_workers: 4
+
+# Paths
+paths:
+  save_dir: ./checkpoints
+  log_dir: ./logs
+
+# Random seed for reproducibility
+seed: 42
+
