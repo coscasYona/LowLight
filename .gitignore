@@ -62,6 +62,8 @@ logs/
 
 # Data (if large datasets shouldn't be committed)
 data/
+!src/data/
+!src/configs/data/
 
 # Temporary files
 *.tmp
