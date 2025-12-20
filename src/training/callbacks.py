@@ -35,12 +35,18 @@ class ImageLoggingCallback(Callback):
         num_samples: int = 4,
         save_to_disk: bool = False,
         save_dir: Optional[str] = None,
+        log_training_images: bool = True,
+        log_validation_images: bool = True,
+        compute_metrics: bool = False,
     ):
         super().__init__()
         self.log_every_n_epochs = log_every_n_epochs
         self.num_samples = num_samples
         self.save_to_disk = save_to_disk
         self.save_dir = save_dir
+        self.log_training_images = log_training_images
+        self.log_validation_images = log_validation_images
+        self.compute_metrics = compute_metrics
     
     def on_validation_epoch_end(
         self, 
@@ -134,23 +140,186 @@ class ImageLoggingCallback(Callback):
             if self.save_to_disk and self.save_dir:
                 self._save_images(
                     img_gt_rgb, noisy_rgb, denoised_rgb,
-                    trainer.current_epoch
+                    trainer.current_epoch, prefix=prefix
                 )
         
         model.train()
-    
+
+    def on_train_epoch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule
+    ):
+        """Log training images at end of training epoch."""
+        if not self.log_training_images:
+            return
+
+        if trainer.current_epoch % self.log_every_n_epochs != 0:
+            return
+
+        # Check if we have training outputs with images
+        if not hasattr(pl_module, 'training_step_outputs'):
+            return
+
+        outputs = pl_module.training_step_outputs
+        if not outputs:
+            return
+
+        # Use the stored training batch
+        image_output = outputs[0] if outputs else None
+        if image_output is None:
+            return
+
+        self._log_images(trainer, pl_module, image_output, prefix='Train')
+
+    def _log_images(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule,
+        image_output: dict,
+        prefix: str = 'Validation'
+    ):
+        """Shared method to log images for training/validation."""
+        # Get model for inference
+        model = pl_module.model
+        if hasattr(pl_module, 'ema_model') and pl_module.ema_model is not None:
+            model = pl_module.ema_model
+
+        model.eval()
+        with torch.no_grad():
+            img_gt = image_output['img_gt'].to(pl_module.device)
+            noisy_state = image_output['noisy_state'].to(pl_module.device)
+            iso = image_output['iso'].to(pl_module.device)
+            ratio = image_output['ratio'].to(pl_module.device)
+            camera_params_list = image_output.get('camera_params_list')
+
+            # Use real noisy input if available (better for visualization)
+            img_noisy = image_output.get('img_noisy')
+            if img_noisy is not None:
+                img_noisy = img_noisy.to(pl_module.device)
+            else:
+                img_noisy = noisy_state
+
+            # Determine if we should pass cond_image for measurement conditioning
+            cond_image = None
+            if hasattr(pl_module, 'use_measurement_cond') and pl_module.use_measurement_cond:
+                cond_image = img_noisy
+
+            # Generate denoised images from real noisy input
+            denoised = model.sample(
+                img_noisy,
+                iso=iso,
+                ratio=ratio,
+                num_steps=min(50, pl_module.num_steps),
+                camera_params=camera_params_list[0] if camera_params_list else None,
+                cond_image=cond_image,
+            )
+
+            # Convert to RGB for visualization (4ch RGGB -> 3ch RGB)
+            def to_rgb(x):
+                """Convert 4-channel RGGB to 3-channel RGB."""
+                if x.dim() == 3:
+                    x = x.unsqueeze(0)
+                B, C, H, W = x.shape
+                if C == 4:
+                    R = x[:, 0:1]
+                    G = (x[:, 1:2] + x[:, 3:4]) / 2
+                    B_ch = x[:, 2:3]
+                    return torch.cat([R, G, B_ch], dim=1)
+                return x
+
+            img_gt_rgb = to_rgb(img_gt.clamp(0, 1))
+            noisy_rgb = to_rgb(img_noisy.clamp(0, 1))
+            denoised_rgb = to_rgb(denoised.clamp(0, 1))
+
+            # Compute metrics if requested
+            if self.compute_metrics and trainer.logger is not None:
+                try:
+                    from training.metrics import DenoisingMetrics
+                    metrics_calc = DenoisingMetrics(data_range=1.0)
+                    metrics = metrics_calc(img_gt, img_noisy, denoised)
+
+                    # Log metrics to TensorBoard
+                    logger = trainer.logger.experiment
+                    logger.add_scalar(f'{prefix}/PSNR', metrics['psnr'], trainer.current_epoch)
+                    logger.add_scalar(f'{prefix}/SSIM', metrics['ssim'], trainer.current_epoch)
+                    logger.add_scalar(f'{prefix}/SNR_Noisy', metrics['snr_noisy'], trainer.current_epoch)
+                    logger.add_scalar(f'{prefix}/SNR_Denoised', metrics['snr_denoised'], trainer.current_epoch)
+                    logger.add_scalar(f'{prefix}/SNR_Improvement', metrics['snr_improvement'], trainer.current_epoch)
+
+                    print(f"{prefix} Epoch {trainer.current_epoch}: PSNR={metrics['psnr']:.2f}, SSIM={metrics['ssim']:.4f}")
+
+                except Exception as e:
+                    print(f"Warning: Failed to compute {prefix.lower()} metrics: {e}")
+
+            # Log to TensorBoard
+            if trainer.logger is not None:
+                logger = trainer.logger.experiment
+
+                # Concatenate horizontally: [clean | noisy | denoised]
+                grid = torch.cat([img_gt_rgb, noisy_rgb, denoised_rgb], dim=3)
+                logger.add_images(
+                    f'{prefix}/Images',
+                    grid,
+                    trainer.current_epoch,
+                    dataformats='NCHW'
+                )
+
+            # Save to disk
+            if self.save_to_disk and self.save_dir:
+                self._save_images(
+                    img_gt_rgb, noisy_rgb, denoised_rgb,
+                    trainer.current_epoch, prefix=prefix
+                )
+
+        model.train()
+
+    def on_validation_epoch_end(
+        self,
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule
+    ):
+        """Log images at end of validation epoch."""
+        if not self.log_validation_images:
+            return
+
+        if trainer.current_epoch % self.log_every_n_epochs != 0:
+            return
+
+        # Check if we have validation outputs with images
+        if not hasattr(pl_module, 'validation_step_outputs'):
+            return
+
+        outputs = pl_module.validation_step_outputs
+        if not outputs:
+            return
+
+        # Find output with stored images
+        image_output = None
+        for out in outputs:
+            if 'img_gt' in out:
+                image_output = out
+                break
+
+        if image_output is None:
+            return
+
+        self._log_images(trainer, pl_module, image_output, prefix='Validation')
+
     def _save_images(
         self,
         clean: torch.Tensor,
         noisy: torch.Tensor,
         denoised: torch.Tensor,
         epoch: int,
+        prefix: str = 'Validation',
     ):
         """Save images to disk."""
         from PIL import Image
         import numpy as np
-        
-        save_dir = os.path.join(self.save_dir, 'images')
+
+        subdir = 'train_images' if prefix == 'Train' else 'val_images'
+        save_dir = os.path.join(self.save_dir, subdir)
         os.makedirs(save_dir, exist_ok=True)
         
         for i in range(min(clean.shape[0], self.num_samples)):

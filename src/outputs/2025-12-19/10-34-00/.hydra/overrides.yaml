@@ -1,0 +1,5 @@
+- training.epochs=1
+- hardware.accelerator=cpu
+- hardware.devices=1
+- hardware.num_workers=0
+- logging.log_every_n_steps=1

@@ -64,12 +64,15 @@ def create_callbacks(cfg: DictConfig) -> list:
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     callbacks.append(lr_monitor)
     
-    # Image logging
+    # Image logging (training and validation)
     image_logger = ImageLoggingCallback(
         log_every_n_epochs=cfg.logging.image_log_every_n_epochs,
         num_samples=cfg.logging.num_sample_images,
         save_to_disk=True,
         save_dir=cfg.paths.save_dir,
+        log_training_images=True,
+        log_validation_images=True,
+        compute_metrics=True,
     )
     callbacks.append(image_logger)
     
@@ -102,6 +105,7 @@ def main(cfg: DictConfig) -> float:
     print("=" * 60)
     print(OmegaConf.to_yaml(cfg))
     print("=" * 60)
+
     
     # Set seed for reproducibility
     pl.seed_everything(cfg.seed, workers=True)
@@ -112,6 +116,8 @@ def main(cfg: DictConfig) -> float:
     
     # Create data module
     data_config = cfg.data if hasattr(cfg, 'data') else cfg
+
+
     datamodule = EMVA1288DataModule(
         train_dir=data_config.train_dir,
         val_dir=data_config.get('val_dir', data_config.train_dir),
@@ -167,7 +173,7 @@ def main(cfg: DictConfig) -> float:
     )
     
     # Create trainer
-    trainer = pl.Trainer(
+    trainer_kwargs = dict(
         max_epochs=cfg.training.epochs,
         accelerator=cfg.hardware.accelerator,
         devices=cfg.hardware.devices,
@@ -180,10 +186,27 @@ def main(cfg: DictConfig) -> float:
         enable_progress_bar=True,
         enable_model_summary=True,
     )
+
+    # Optional debug knobs (can be passed via CLI as e.g. trainer.limit_train_batches=1)
+    if hasattr(cfg, "trainer"):
+        for key in (
+            "fast_dev_run",
+            "limit_train_batches",
+            "limit_val_batches",
+            "num_sanity_val_steps",
+            "max_steps",
+        ):
+            if key in cfg.trainer and cfg.trainer.get(key) is not None:
+                trainer_kwargs[key] = cfg.trainer.get(key)
+
+    trainer = pl.Trainer(**trainer_kwargs)
     
     # Train
     print("\nStarting training...")
-    trainer.fit(model, datamodule)
+    try:
+        trainer.fit(model, datamodule)
+    except Exception as e:
+        raise
     
     # Get best checkpoint
     best_model_path = trainer.checkpoint_callback.best_model_path

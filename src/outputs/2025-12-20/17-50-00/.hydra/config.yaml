@@ -1,0 +1,72 @@
+model:
+  in_channels: 4
+  out_channels: 4
+  base_channels: 32
+  channel_mults:
+  - 1
+  - 2
+  - 4
+  num_steps: 4
+  time_embed_dim: 64
+  cond_embed_dim: 64
+  attn_type: linear
+  scheduler: ddpm
+  schedule_type: linear
+  camera_type: SonyA7S2
+  noise_code: prq
+  use_measurement_cond: false
+data:
+  type: sid
+  train_dir: ${oc.env:SID_DATASET_PATH,../data/SID/Sony}
+  val_dir: ${oc.env:SID_DATASET_PATH,../data/SID/Sony}
+  train_list: ../dataset/Sony_train.txt
+  val_list: ../dataset/Sony_val.txt
+  batch_size: 1
+  num_workers: 4
+  pin_memory: true
+  patch_size: 512
+  use_sid_raw: true
+  use_fuji_raw: false
+  val_split: 0.1
+training:
+  epochs: 200
+  batch_size: 1
+  learning_rate: 0.0001
+  l1_weight: 0.8
+  gradient_weight: 0.1
+  loss_scale: 10.0
+  use_grad_clip: false
+  grad_clip_max: 1.0
+  use_ema: false
+  ema_decay: 0.9999
+early_stopping:
+  enabled: true
+  patience: 20
+  min_delta: 1.0e-06
+  monitor: val/loss
+  mode: min
+checkpoint:
+  save_top_k: 3
+  monitor: val/loss
+  mode: min
+  save_last: true
+  filename: epoch_{epoch:04d}_val_loss_{val/loss:.4f}
+logging:
+  log_every_n_steps: 50
+  image_log_every_n_epochs: 1
+  num_sample_images: 4
+hardware:
+  accelerator: auto
+  devices: auto
+  precision: 32
+  num_workers: 4
+paths:
+  save_dir: ./checkpoints
+  log_dir: ./logs
+seed: 42
+trainer:
+  fast_dev_run: null
+  limit_train_batches: null
+  limit_val_batches: null
+  num_sanity_val_steps: null
+  max_steps: null

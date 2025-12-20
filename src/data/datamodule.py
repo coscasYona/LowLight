@@ -92,6 +92,7 @@ class EMVA1288DataModule(pl.LightningDataModule):
             if self.use_sid_raw and self.train_list:
                 train_dir = os.path.abspath(self.train_dir)
                 train_list = os.path.abspath(self.train_list)
+
                 
                 if os.path.exists(train_list):
                     sid_train = SIDRawDenoiseDataset(
@@ -101,6 +102,8 @@ class EMVA1288DataModule(pl.LightningDataModule):
                     )
                     train_datasets.append(sid_train)
                     print(f"Loaded SID training dataset: {len(sid_train)} samples")
+                else:
+                    pass
             
             if self.use_fuji_raw and self.fuji_train_list:
                 fuji_dir = os.path.abspath(self.train_dir)
@@ -136,11 +139,14 @@ class EMVA1288DataModule(pl.LightningDataModule):
                     print(f"Split: {train_size} train, {val_size} validation")
                 else:
                     self.train_dataset = combined
+            else:
+                pass
             
             # Build explicit validation dataset
             if self.val_list is not None:
                 val_dir = os.path.abspath(self.val_dir)
                 val_list = os.path.abspath(self.val_list)
+
                 
                 if os.path.exists(val_list):
                     self.val_dataset = SIDRawDenoiseDataset(
@@ -172,7 +178,7 @@ class EMVA1288DataModule(pl.LightningDataModule):
         """Create validation dataloader."""
         if self.val_dataset is None:
             print("Warning: No validation dataset available")
-            return None
+            return []
         
         return DataLoader(
             self.val_dataset,

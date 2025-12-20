@@ -4,10 +4,10 @@
 type: sid
 
 # Paths
-train_dir: ${oc.env:SID_DATASET_PATH,../dataset/SID/Sony}
-val_dir: ${oc.env:SID_DATASET_PATH,../dataset/SID/Sony}
-train_list: ./dataset/Sony_train.txt
-val_list: ./dataset/Sony_val.txt
+train_dir: ${oc.env:SID_DATASET_PATH,../data/SID/Sony}
+val_dir: ${oc.env:SID_DATASET_PATH,../data/SID/Sony}
+train_list: ../dataset/Sony_train.txt
+val_list: ../dataset/Sony_val.txt
 
 # Data loading
 batch_size: 1

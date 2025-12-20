@@ -136,6 +136,7 @@ class EMVA1288LightningModule(pl.LightningModule):
         
         # Store validation outputs for epoch-end processing
         self.validation_step_outputs = []
+        self.training_step_outputs = []
     
     def _create_ema_model(self):
         """Create EMA copy of model."""
@@ -266,7 +267,21 @@ class EMVA1288LightningModule(pl.LightningModule):
         # Log metrics
         self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/loss_unscaled', loss / self.loss_fn.loss_scale)
-        
+
+        # Store last batch for training image logging (only in training mode)
+        if self.training and batch_idx == 0:  # Store first batch of each epoch
+            train_output = {
+                'batch_idx': batch_idx,
+                'img_gt': img_gt[:min(4, batch_size)].detach().cpu(),
+                'noisy_state': noisy_state[:min(4, batch_size)].detach().cpu(),
+                'iso': iso[:min(4, batch_size)].cpu(),
+                'ratio': ratio[:min(4, batch_size)].cpu(),
+                'camera_params_list': camera_params_list[:min(4, batch_size)],
+            }
+            if img_noisy is not None:
+                train_output['img_noisy'] = img_noisy[:min(4, batch_size)].detach().cpu()
+            self.training_step_outputs = [train_output]  # Replace with latest batch
+
         return loss
     
     def validation_step(
@@ -400,7 +415,7 @@ class EMVA1288LightningModule(pl.LightningModule):
             iso = first_batch.get('iso')
             ratio = first_batch.get('ratio')
             camera_params_list = first_batch.get('camera_params_list')
-            
+
             # Sample denoised output from real noisy measurement
             with torch.no_grad():
                 denoised = self.model.sample(
@@ -411,9 +426,10 @@ class EMVA1288LightningModule(pl.LightningModule):
                     camera_params=camera_params_list[0] if camera_params_list else None,
                     cond_image=img_noisy if self.model.use_measurement_cond else None,
                 )
-                
+
                 # Compute PSNR and SSIM on denoised output
-                metrics = self.metrics(denoised, img_gt)
+                metrics = self.metrics(img_gt, img_noisy, denoised)
+
                 self.log('val/psnr', metrics['psnr'], prog_bar=True, sync_dist=True)
                 self.log('val/ssim', metrics['ssim'], sync_dist=True)
         

@@ -9,7 +9,7 @@ defaults:
 # Training hyperparameters
 training:
   epochs: 200
-  batch_size: 1
+  batch_size: 16
   learning_rate: 1e-4
   l1_weight: 0.8
   gradient_weight: 0.1
@@ -57,4 +57,12 @@ paths:
 
 # Random seed for reproducibility
 seed: 42
+
+# Trainer debug knobs (optional; can be overridden via CLI)
+trainer:
+  fast_dev_run: null
+  limit_train_batches: null
+  limit_val_batches: null
+  num_sanity_val_steps: null
+  max_steps: null
 

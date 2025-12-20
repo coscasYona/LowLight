@@ -74,3 +74,4 @@ databases/optuna/test/
 *.db
 !databases/optuna/production/*.db
 
+src/checkpoints/*
