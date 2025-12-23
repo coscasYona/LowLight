@@ -7,7 +7,7 @@ base_channels: 64
 channel_mults: [1, 2, 4, 8]
 
 # Diffusion settings
-num_steps: 50
+num_steps: 4
 time_embed_dim: 128
 cond_embed_dim: 64
 
@@ -28,4 +28,15 @@ noise_code: prq  # p=Poisson shot, r=row, q=quantization
 # When enabled, in_channels is automatically doubled for the U-Net
 # This helps the model learn to leverage the actual sensor noise structure
 use_measurement_cond: true  # Enabled for better quality with real noisy data
+
+# Edge conditioning (ControlNet-style)
+# When enabled, edge maps are extracted and used to condition the U-Net
+# This improves edge preservation in denoised images
+use_edge_cond: false  # Set to true for edge-aware denoising
+
+# Edge detector type: "canny", "hed", or "multiscale"
+# - canny: Fast differentiable Canny edge detector
+# - hed: Lightweight HED (Holistically-Nested Edge Detection)
+# - multiscale: Combines Canny and HED at multiple scales (best quality, slower)
+edge_detector: canny
 

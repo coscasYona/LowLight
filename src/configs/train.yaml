@@ -9,15 +9,22 @@ defaults:
 # Training hyperparameters
 training:
   epochs: 200
-  batch_size: 16
-  learning_rate: 1e-4
+  batch_size: 3
+  learning_rate: 2e-4
   l1_weight: 0.8
-  gradient_weight: 0.1
-  loss_scale: 10.0
-  use_grad_clip: false
+  gradient_weight: 0.05
+  loss_scale: 1.0
+  use_grad_clip: true
   grad_clip_max: 1.0
   use_ema: false
   ema_decay: 0.9999
+  
+  # Enhanced SOTA loss function (set use_enhanced_loss: true to enable)
+  # Combines MSE, L1, Charbonnier, frequency-domain, and multi-scale gradient losses
+  use_enhanced_loss: false  # Set to true for SOTA edge preservation
+  mse_weight: 0.25          # Weight for MSE loss
+  charbonnier_weight: 0.25  # Weight for Charbonnier loss (smooth L1)
+  frequency_weight: 0.1     # Weight for FFT-based frequency loss (edge preservation)
 
 # Early stopping
 # Note: You can monitor "val/psnr" (mode: max) for better image quality tracking
@@ -39,7 +46,7 @@ checkpoint:
 
 # Logging
 logging:
-  log_every_n_steps: 50
+  log_every_n_steps: 100
   image_log_every_n_epochs: 1
   num_sample_images: 4
 

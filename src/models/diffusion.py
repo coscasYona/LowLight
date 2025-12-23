@@ -3,6 +3,8 @@ EMVA 1288 Physics-Guided Diffusion Model.
 
 Main diffusion model that combines the U-Net backbone with physics-based
 conditioning and noise generation following the EMVA 1288 standard.
+
+Supports optional edge conditioning for improved edge preservation.
 """
 
 from typing import Dict, Iterable, Optional, Tuple, Union, Sequence
@@ -36,6 +38,8 @@ class EMVA1288Diffusion(nn.Module):
         schedule_type: Noise schedule ("linear", "cosine")
         camera_type: Camera type for EMVA 1288 noise model
         noise_code: Noise components to include (p=Poisson, r=row, q=quantization)
+        use_edge_cond: Whether to use edge conditioning (default: False)
+        edge_detector: Edge detector type ("canny", "hed", "multiscale")
     """
     
     def __init__(
@@ -53,6 +57,8 @@ class EMVA1288Diffusion(nn.Module):
         camera_type: str = "SonyA7S2",
         noise_code: str = "prq",
         use_measurement_cond: bool = False,
+        use_edge_cond: bool = False,
+        edge_detector: str = "canny",
     ):
         super().__init__()
         self.num_steps = max(1, num_steps)
@@ -60,6 +66,11 @@ class EMVA1288Diffusion(nn.Module):
         self.camera_type = camera_type
         self.noise_code = noise_code
         self.use_measurement_cond = use_measurement_cond
+        self.use_edge_cond = use_edge_cond
+        self.edge_detector_type = edge_detector
+        
+        # Edge channels for conditioning
+        edge_channels = 64
         
         # Time embedding
         self.time_embed = nn.Sequential(
@@ -73,7 +84,7 @@ class EMVA1288Diffusion(nn.Module):
         self.physics_encoder = EMVA1288PhysicsEncoder(cond_embed_dim)
         emb_dim = time_embed_dim + cond_embed_dim
         
-        # U-Net backbone
+        # U-Net backbone (with optional edge conditioning)
         self.unet = SlimUNet(
             in_ch=in_channels,
             out_ch=out_channels,
@@ -81,7 +92,13 @@ class EMVA1288Diffusion(nn.Module):
             channel_mults=channel_mults,
             emb_dim=emb_dim,
             attn_type=attn_type,
+            use_edge_cond=use_edge_cond,
+            edge_channels=edge_channels,
         )
+        
+        # Edge detection and encoding (if enabled)
+        if use_edge_cond:
+            self._init_edge_modules(edge_detector, edge_channels)
         
         # Diffusion scheduler
         self.diffusion_scheduler = DiffusionScheduler(
@@ -97,6 +114,28 @@ class EMVA1288Diffusion(nn.Module):
         
         # Register scheduler buffers for backward compatibility
         self._register_scheduler_buffers()
+    
+    def _init_edge_modules(self, edge_detector: str, edge_channels: int):
+        """Initialize edge detection and encoding modules."""
+        from models.edge_detection import (
+            CannyEdgeDetector, 
+            LightweightHED, 
+            MultiScaleEdgeDetector,
+            EdgeEncoder,
+        )
+        
+        if edge_detector == "canny":
+            self.edge_detector = CannyEdgeDetector()
+        elif edge_detector == "hed":
+            self.edge_detector = LightweightHED()
+        elif edge_detector == "multiscale":
+            self.edge_detector = MultiScaleEdgeDetector(
+                use_canny=True, use_hed=True
+            )
+        else:
+            self.edge_detector = CannyEdgeDetector()
+        
+        self.edge_encoder = EdgeEncoder(out_channels=edge_channels)
     
     def _register_scheduler_buffers(self):
         """Register scheduler buffers on this module for compatibility."""
@@ -147,6 +186,7 @@ class EMVA1288Diffusion(nn.Module):
         predict_noise: bool = False,
         camera_params: Optional[Dict] = None,
         cond_image: Optional[torch.Tensor] = None,
+        edge_feat: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass.
@@ -159,6 +199,8 @@ class EMVA1288Diffusion(nn.Module):
             num_steps: Number of sampling steps (for inference)
             predict_noise: If True, predict noise; else, sample denoised image
             camera_params: Optional camera parameters for noise model
+            cond_image: Conditioning image for measurement conditioning
+            edge_feat: Pre-computed edge features for edge conditioning
             
         Returns:
             Predicted noise or denoised image
@@ -166,7 +208,10 @@ class EMVA1288Diffusion(nn.Module):
         if predict_noise:
             if timesteps is None:
                 raise ValueError("Timesteps required for noise prediction.")
-            return self._predict_noise(x, timesteps, iso, ratio, camera_params, cond_image=cond_image)
+            return self._predict_noise(
+                x, timesteps, iso, ratio, camera_params, 
+                cond_image=cond_image, edge_feat=edge_feat
+            )
         return self.sample(
             x,
             iso=iso,
@@ -174,6 +219,7 @@ class EMVA1288Diffusion(nn.Module):
             num_steps=num_steps,
             camera_params=camera_params,
             cond_image=cond_image,
+            edge_feat=edge_feat,
         )
     
     def _prepare_iso_ratio(
@@ -207,6 +253,30 @@ class EMVA1288Diffusion(nn.Module):
         t = timesteps.float() / float(steps)
         return self.time_embed(t)
     
+    def compute_edge_features(
+        self, 
+        image: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """
+        Compute edge features from input image.
+        
+        Args:
+            image: Input image [B, C, H, W]
+            
+        Returns:
+            Edge features [B, edge_channels, H, W] or None if edge cond disabled
+        """
+        if not self.use_edge_cond:
+            return None
+        
+        # Detect edges (works on any number of channels)
+        edge_map = self.edge_detector(image)
+        
+        # Encode edges to feature space
+        edge_feat = self.edge_encoder(edge_map)
+        
+        return edge_feat
+    
     def _predict_noise(
         self,
         x: torch.Tensor,
@@ -215,6 +285,7 @@ class EMVA1288Diffusion(nn.Module):
         ratio: Optional[torch.Tensor],
         camera_params: Optional[Dict] = None,
         cond_image: Optional[torch.Tensor] = None,
+        edge_feat: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Predict noise for given noisy input."""
         b = x.size(0)
@@ -222,6 +293,12 @@ class EMVA1288Diffusion(nn.Module):
         t_emb = self._time_embedding(timesteps)
         physics_emb = self.physics_encoder(iso, ratio, camera_params)
         emb = torch.cat([t_emb, physics_emb], dim=-1)
+        
+        # Compute edge features if enabled and not provided
+        if self.use_edge_cond and edge_feat is None:
+            # Use conditioning image for edge detection if available
+            edge_source = cond_image if cond_image is not None else x
+            edge_feat = self.compute_edge_features(edge_source)
         
         if self.use_measurement_cond:
             # When measurement conditioning is enabled, U-Net expects doubled channels
@@ -234,7 +311,7 @@ class EMVA1288Diffusion(nn.Module):
                 raise ValueError(f"cond_image spatial mismatch: {cond_image.shape[2:]} vs {x.shape[2:]}")
             x = torch.cat([x, cond_image], dim=1)
         
-        return self.unet(x, emb)
+        return self.unet(x, emb, edge_feat=edge_feat)
     
     def generate_cmos_noise(
         self, 
@@ -345,6 +422,7 @@ class EMVA1288Diffusion(nn.Module):
         eta: float = 0.0,
         camera_params: Optional[Dict] = None,
         cond_image: Optional[torch.Tensor] = None,
+        edge_feat: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Sample using DDPM or DDIM.
@@ -356,6 +434,8 @@ class EMVA1288Diffusion(nn.Module):
             num_steps: Number of sampling steps
             eta: DDIM noise level (0=deterministic, 1=DDPM)
             camera_params: Camera parameters
+            cond_image: Conditioning image for measurement conditioning
+            edge_feat: Pre-computed edge features (optional)
             
         Returns:
             Denoised image [B, C, H, W]
@@ -365,11 +445,18 @@ class EMVA1288Diffusion(nn.Module):
         if cond_image is None:
             cond_image = measurement
         
+        # Compute edge features once at the start (for efficiency)
+        if self.use_edge_cond and edge_feat is None:
+            edge_feat = self.compute_edge_features(cond_image)
+        
         use_ddim = self.scheduler_type == "ddim" or eta == 0.0
         
         for step in reversed(range(steps)):
             t = torch.full((x.size(0),), step, device=x.device, dtype=torch.long)
-            eps = self._predict_noise(x, t, iso, ratio, camera_params, cond_image=cond_image)
+            eps = self._predict_noise(
+                x, t, iso, ratio, camera_params, 
+                cond_image=cond_image, edge_feat=edge_feat
+            )
             
             if use_ddim:
                 prev_t = torch.clamp(t - 1, min=0)

@@ -3,6 +3,8 @@ PyTorch Lightning module for EMVA 1288 diffusion model training.
 
 Encapsulates training, validation, and inference logic with proper
 logging, checkpointing, and metric tracking.
+
+Supports edge conditioning and enhanced SOTA loss functions.
 """
 
 from typing import Any, Dict, Optional, Tuple
@@ -14,7 +16,7 @@ from omegaconf import DictConfig
 
 from models import EMVA1288Diffusion
 from models.noise_model import sample_params_max
-from training.losses import HybridDiffusionLoss
+from training.losses import HybridDiffusionLoss, EnhancedHybridLoss
 from training.metrics import DenoisingMetrics
 
 
@@ -27,6 +29,7 @@ class EMVA1288LightningModule(pl.LightningModule):
     - Validation with image logging
     - Learning rate scheduling
     - Metric tracking and logging
+    - Optional edge conditioning for improved edge preservation
     
     Args:
         model_config: Model configuration
@@ -50,12 +53,19 @@ class EMVA1288LightningModule(pl.LightningModule):
         camera_type: str = "SonyA7S2",
         noise_code: str = "prq",
         use_measurement_cond: bool = False,
+        use_edge_cond: bool = False,
+        edge_detector: str = "canny",
         learning_rate: float = 1e-4,
         l1_weight: float = 0.8,
         gradient_weight: float = 0.1,
         loss_scale: float = 10.0,
         use_ema: bool = False,
         ema_decay: float = 0.9999,
+        # Enhanced loss options
+        use_enhanced_loss: bool = False,
+        mse_weight: float = 0.25,
+        charbonnier_weight: float = 0.25,
+        frequency_weight: float = 0.1,
     ):
         super().__init__()
         
@@ -76,6 +86,8 @@ class EMVA1288LightningModule(pl.LightningModule):
             camera_type = getattr(model_config, 'camera_type', camera_type)
             noise_code = getattr(model_config, 'noise_code', noise_code)
             use_measurement_cond = getattr(model_config, 'use_measurement_cond', use_measurement_cond)
+            use_edge_cond = getattr(model_config, 'use_edge_cond', use_edge_cond)
+            edge_detector = getattr(model_config, 'edge_detector', edge_detector)
         
         if training_config is not None:
             learning_rate = getattr(training_config, 'learning_rate', learning_rate)
@@ -84,6 +96,10 @@ class EMVA1288LightningModule(pl.LightningModule):
             loss_scale = getattr(training_config, 'loss_scale', loss_scale)
             use_ema = getattr(training_config, 'use_ema', use_ema)
             ema_decay = getattr(training_config, 'ema_decay', ema_decay)
+            use_enhanced_loss = getattr(training_config, 'use_enhanced_loss', use_enhanced_loss)
+            mse_weight = getattr(training_config, 'mse_weight', mse_weight)
+            charbonnier_weight = getattr(training_config, 'charbonnier_weight', charbonnier_weight)
+            frequency_weight = getattr(training_config, 'frequency_weight', frequency_weight)
         
         # Store config
         self.learning_rate = learning_rate
@@ -92,6 +108,7 @@ class EMVA1288LightningModule(pl.LightningModule):
         self.ema_decay = ema_decay
         self.num_steps = num_steps
         self.use_measurement_cond = use_measurement_cond
+        self.use_edge_cond = use_edge_cond
         
         # Ensure channel_mults is a tuple
         if isinstance(channel_mults, str):
@@ -102,7 +119,7 @@ class EMVA1288LightningModule(pl.LightningModule):
         # Double input channels when using measurement conditioning (x_t concat with noisy)
         model_in_channels = in_channels * 2 if use_measurement_cond else in_channels
         
-        # Create model
+        # Create model with edge conditioning support
         self.model = EMVA1288Diffusion(
             in_channels=model_in_channels,
             out_channels=out_channels,
@@ -116,14 +133,26 @@ class EMVA1288LightningModule(pl.LightningModule):
             camera_type=camera_type,
             noise_code=noise_code,
             use_measurement_cond=use_measurement_cond,
+            use_edge_cond=use_edge_cond,
+            edge_detector=edge_detector,
         )
         
-        # Loss function
-        self.loss_fn = HybridDiffusionLoss(
-            l1_weight=l1_weight,
-            gradient_weight=gradient_weight,
-            loss_scale=loss_scale,
-        )
+        # Loss function (enhanced or standard)
+        if use_enhanced_loss:
+            self.loss_fn = EnhancedHybridLoss(
+                mse_weight=mse_weight,
+                l1_weight=l1_weight,
+                charbonnier_weight=charbonnier_weight,
+                frequency_weight=frequency_weight,
+                gradient_weight=gradient_weight,
+                loss_scale=loss_scale,
+            )
+        else:
+            self.loss_fn = HybridDiffusionLoss(
+                l1_weight=l1_weight,
+                gradient_weight=gradient_weight,
+                loss_scale=loss_scale,
+            )
         
         # Metrics
         self.metrics = DenoisingMetrics(data_range=1.0)
@@ -173,7 +202,11 @@ class EMVA1288LightningModule(pl.LightningModule):
         self, batch: Dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
         """
-        Training step with EMVA 1288 physics-based noise (aligned with validation).
+        Training step with simple Gaussian diffusion (matching legacy implementation).
+        
+        Note: Legacy code used simple Gaussian for training (more stable convergence)
+        while physics noise is used for validation. This asymmetry worked well
+        because the model learns the noise structure from the conditioning (ISO/ratio).
         
         Args:
             batch: Dict with 'clean', 'noisy', 'ratio', 'ISO'
@@ -197,62 +230,72 @@ class EMVA1288LightningModule(pl.LightningModule):
         # Generate base noise
         base_noise = torch.randn_like(img_gt)
         
-        # Get per-sample camera parameters for proper EMVA noise generation
+        # Get camera parameters for conditioning (uses first sample's ISO/ratio like legacy)
         iso_np = iso.cpu().numpy().flatten()
         ratio_np = ratio.cpu().numpy().flatten()
-        camera_params_list = []
-        for i in range(batch_size):
-            iso_val = int(iso_np[i]) if i < len(iso_np) else 6400
-            ratio_val = float(ratio_np[i]) if i < len(ratio_np) else 200.0
-            params = sample_params_max(
-                camera_type=self.camera_type,
-                iso=iso_val,
-                ratio=ratio_val
-            )
-            camera_params_list.append(params)
+        iso_val = int(iso_np[0]) if len(iso_np) > 0 else 6400
+        ratio_val = float(ratio_np[0]) if len(ratio_np) > 0 else 200.0
+        camera_params = sample_params_max(
+            camera_type=self.camera_type,
+            iso=iso_val,
+            ratio=ratio_val
+        )
         
         # Get real noisy measurement for conditioning (if available and enabled)
         img_noisy = batch.get('noisy', None)
         cond_image = img_noisy if self.use_measurement_cond and img_noisy is not None else None
         
-        # Forward diffusion with EMVA 1288 physics-based noise (matching validation)
+        # Compute edge features from clean image for training (if enabled)
+        edge_feat = None
+        if self.use_edge_cond:
+            edge_feat = self.model.compute_edge_features(img_gt)
+        
+        # Use physics-based noise for training to match validation
+        # This ensures the model learns the correct noise distribution
         noisy_state = self.model.q_sample(
             img_gt, base_noise, timesteps,
             iso=iso, ratio=ratio,
-            camera_params=camera_params_list,
+            camera_params=camera_params,
             use_physics_noise=True,
         )
-        
-        # Predict noise (with measurement conditioning if enabled)
+
+        # Predict noise (with measurement and edge conditioning if enabled)
         pred_noise = self.model(
             noisy_state,
             iso=iso,
             ratio=ratio,
             timesteps=timesteps,
             predict_noise=True,
-            camera_params=camera_params_list,
+            camera_params=camera_params,
             cond_image=cond_image,
+            edge_feat=edge_feat,
         )
-        
-        # Compute actual noise (from forward diffusion)
+
+        # Compute actual noise using the same formula as validation
+        # Even with physics noise, we compute the theoretical noise for loss computation
+        # Ensure high precision for noise computation to avoid gradient issues
         sqrt_alpha = self.model._extract(
             self.model.sqrt_alphas_cumprod, timesteps, img_gt.shape
-        )
+        ).float()  # Ensure float32
         sqrt_one_minus_alpha = self.model._extract(
             self.model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
-        )
+        ).float()  # Ensure float32
         sqrt_one_minus_alpha_safe = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
-        actual_noise = (noisy_state - sqrt_alpha * img_gt) / sqrt_one_minus_alpha_safe
+
+        # Compute noise in high precision
+        actual_noise = (noisy_state.float() - sqrt_alpha * img_gt.float()) / sqrt_one_minus_alpha_safe
         actual_noise = torch.where(
             torch.isfinite(actual_noise), actual_noise, torch.zeros_like(actual_noise)
         )
         actual_noise = torch.clamp(actual_noise, min=-10.0, max=10.0)
-        
+
+        # Ensure predicted noise is also in high precision
+        pred_noise = pred_noise.float()
         pred_noise = torch.where(
             torch.isfinite(pred_noise), pred_noise, torch.zeros_like(pred_noise)
         )
-        
-        # Compute loss
+
+        # Compute loss with high precision tensors
         loss = self.loss_fn(pred_noise, actual_noise)
         
         # Check for NaN loss
@@ -264,8 +307,8 @@ class EMVA1288LightningModule(pl.LightningModule):
         if self.use_ema and self.training:
             self._update_ema()
         
-        # Log metrics
-        self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        # Log metrics (step-level only to reduce clutter)
+        self.log('train/loss', loss, on_step=True, on_epoch=False, prog_bar=True)
         self.log('train/loss_unscaled', loss / self.loss_fn.loss_scale)
 
         # Store last batch for training image logging (only in training mode)
@@ -276,7 +319,7 @@ class EMVA1288LightningModule(pl.LightningModule):
                 'noisy_state': noisy_state[:min(4, batch_size)].detach().cpu(),
                 'iso': iso[:min(4, batch_size)].cpu(),
                 'ratio': ratio[:min(4, batch_size)].cpu(),
-                'camera_params_list': camera_params_list[:min(4, batch_size)],
+                'camera_params_list': [camera_params] * min(4, batch_size),
             }
             if img_noisy is not None:
                 train_output['img_noisy'] = img_noisy[:min(4, batch_size)].detach().cpu()
@@ -329,6 +372,12 @@ class EMVA1288LightningModule(pl.LightningModule):
         # Get real noisy measurement for conditioning (if available and enabled)
         cond_image = img_noisy if self.use_measurement_cond and img_noisy is not None else None
         
+        # Compute edge features from clean image for validation (if enabled)
+        # During validation, we use clean image edges as the ground truth target
+        edge_feat = None
+        if self.use_edge_cond:
+            edge_feat = self.model.compute_edge_features(img_gt)
+        
         # Forward with physics noise for validation
         noisy_state = self.model.q_sample(
             img_gt, base_noise, timesteps,
@@ -337,7 +386,7 @@ class EMVA1288LightningModule(pl.LightningModule):
             use_physics_noise=True,
         )
         
-        # Predict noise (with measurement conditioning if enabled)
+        # Predict noise (with measurement and edge conditioning if enabled)
         pred_noise = self.model(
             noisy_state,
             iso=iso,
@@ -346,22 +395,24 @@ class EMVA1288LightningModule(pl.LightningModule):
             predict_noise=True,
             camera_params=camera_params_list,
             cond_image=cond_image,
+            edge_feat=edge_feat,
         )
         
-        # Compute actual noise
+        # Compute actual noise with high precision
         sqrt_alpha = self.model._extract(
             self.model.sqrt_alphas_cumprod, timesteps, img_gt.shape
-        )
+        ).float()  # Ensure float32
         sqrt_one_minus_alpha = self.model._extract(
             self.model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
-        )
+        ).float()  # Ensure float32
         sqrt_one_minus_alpha = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
-        
-        actual_noise = (noisy_state - sqrt_alpha * img_gt) / sqrt_one_minus_alpha
+
+        actual_noise = (noisy_state.float() - sqrt_alpha * img_gt.float()) / sqrt_one_minus_alpha
         actual_noise = torch.where(
             torch.isfinite(actual_noise), actual_noise, torch.zeros_like(actual_noise)
         )
         actual_noise = torch.clamp(actual_noise, min=-10.0, max=10.0)
+        pred_noise = pred_noise.float()  # Ensure float32
         pred_noise = torch.where(
             torch.isfinite(pred_noise), pred_noise, torch.zeros_like(pred_noise)
         )
@@ -418,6 +469,12 @@ class EMVA1288LightningModule(pl.LightningModule):
 
             # Sample denoised output from real noisy measurement
             with torch.no_grad():
+                # Compute edge features from noisy image for inference
+                # (In real inference, we only have noisy input)
+                edge_feat = None
+                if self.use_edge_cond:
+                    edge_feat = self.model.compute_edge_features(img_noisy)
+                
                 denoised = self.model.sample(
                     img_noisy,
                     iso=iso,
@@ -425,6 +482,7 @@ class EMVA1288LightningModule(pl.LightningModule):
                     num_steps=self.num_steps,
                     camera_params=camera_params_list[0] if camera_params_list else None,
                     cond_image=img_noisy if self.model.use_measurement_cond else None,
+                    edge_feat=edge_feat,
                 )
 
                 # Compute PSNR and SSIM on denoised output
@@ -443,12 +501,22 @@ class EMVA1288LightningModule(pl.LightningModule):
             lr=self.learning_rate
         )
         
-        # Milestone-based LR scheduler (matching original implementation)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer,
-            milestones=[100, 180],
-            gamma=0.5,
-        )
+        # LR schedule with warmup for physics noise training:
+        # - Epoch 1-9: warmup from 2e-5 to 2e-4 (×0.1 to ×1.0)
+        # - Epoch 10-99: 2e-4
+        # - Epoch 100-179: 1e-4 (×0.5)
+        # - Epoch 180+: 2e-5 (×0.1)
+        def lr_lambda(epoch):
+            if epoch < 10:
+                return 0.1 + 0.9 * (epoch / 9)  # Warmup from 0.1x to 1.0x
+            elif epoch < 100:
+                return 1.0
+            elif epoch < 180:
+                return 0.5
+            else:
+                return 0.1
+        
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         
         return {
             'optimizer': optimizer,

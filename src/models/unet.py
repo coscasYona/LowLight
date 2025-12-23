@@ -3,10 +3,12 @@ SlimUNet architecture for EMVA 1288 diffusion model.
 
 A memory-efficient U-Net with linear attention blocks for
 denoising diffusion probabilistic models.
+
+Supports optional edge conditioning via ControlNet-style integration.
 """
 
 import math
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -234,6 +236,8 @@ class SlimUNet(nn.Module):
         channel_mults: Channel multipliers for each level
         emb_dim: Embedding dimension for time/conditioning
         attn_type: Type of attention ("linear", "channel", or None)
+        use_edge_cond: Whether to use edge conditioning (default: False)
+        edge_channels: Number of edge feature channels (default: 64)
     """
     
     def __init__(
@@ -244,10 +248,14 @@ class SlimUNet(nn.Module):
         channel_mults: Iterable[int],
         emb_dim: int,
         attn_type: str = "linear",
+        use_edge_cond: bool = False,
+        edge_channels: int = 64,
     ):
         super().__init__()
         self.in_ch = in_ch
         self.out_ch = out_ch
+        self.use_edge_cond = use_edge_cond
+        self.edge_channels = edge_channels
         self.in_conv = nn.Conv2d(in_ch, base_ch, 3, padding=1)
         self.emb_proj = nn.Sequential(nn.SiLU(), nn.Linear(emb_dim, emb_dim))
 
@@ -276,21 +284,75 @@ class SlimUNet(nn.Module):
         self.out_norm = nn.GroupNorm(8, curr_ch)
         self.out_conv = nn.Conv2d(curr_ch, out_ch, 3, padding=1)
         self.apply(_init_conv)
+        
+        # Edge conditioning blocks (lazy import to avoid circular dependencies)
+        if use_edge_cond:
+            self._init_edge_conditioning(base_ch, mults, edge_channels)
+    
+    def _init_edge_conditioning(
+        self, 
+        base_ch: int, 
+        mults: Tuple[int, ...], 
+        edge_channels: int
+    ):
+        """Initialize edge conditioning blocks."""
+        from models.edge_conditioning import EdgeConditioningBlock
+        
+        # Edge conditioning at each encoder level
+        self.edge_cond_downs = nn.ModuleList()
+        for mult in mults:
+            ch = base_ch * mult
+            self.edge_cond_downs.append(
+                EdgeConditioningBlock(ch, edge_channels)
+            )
+        
+        # Edge conditioning at decoder levels
+        self.edge_cond_ups = nn.ModuleList()
+        for mult in reversed(mults):
+            ch = base_ch * mult
+            self.edge_cond_ups.append(
+                EdgeConditioningBlock(ch, edge_channels)
+            )
 
-    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        emb: torch.Tensor,
+        edge_feat: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Forward pass with optional edge conditioning.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            emb: Conditioning embedding [B, emb_dim]
+            edge_feat: Optional edge features [B, edge_channels, H, W]
+            
+        Returns:
+            Output tensor [B, out_ch, H, W]
+        """
         emb = self.emb_proj(emb)
         x = self.in_conv(x)
         skips: List[torch.Tensor] = []
         
-        for block in self.downs:
+        for i, block in enumerate(self.downs):
             x, skip = block(x, emb)
+            
+            # Apply edge conditioning at encoder
+            if self.use_edge_cond and edge_feat is not None:
+                skip = self.edge_cond_downs[i](skip, edge_feat)
+            
             skips.append(skip)
 
         x = self.mid(x, emb)
 
-        for block in self.ups:
+        for i, block in enumerate(self.ups):
             skip = skips.pop()
             x = block(x, skip, emb)
+            
+            # Apply edge conditioning at decoder
+            if self.use_edge_cond and edge_feat is not None:
+                x = self.edge_cond_ups[i](x, edge_feat)
 
         x = self.out_norm(x)
         x = F.silu(x)
