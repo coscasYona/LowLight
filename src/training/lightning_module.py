@@ -283,13 +283,17 @@ class EMVA1288LightningModule(pl.LightningModule):
         sqrt_one_minus_alpha_safe = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
 
         # Compute noise in high precision
+        # NOTE: actual_noise is the target, so it doesn't need gradients
+        # Detaching ensures clean gradient flow through pred_noise only
         actual_noise = (noisy_state.float() - sqrt_alpha * img_gt.float()) / sqrt_one_minus_alpha_safe
         actual_noise = torch.where(
             torch.isfinite(actual_noise), actual_noise, torch.zeros_like(actual_noise)
         )
+        actual_noise = actual_noise.detach()  # Detach target to ensure clean gradient flow
         actual_noise = torch.clamp(actual_noise, min=-10.0, max=10.0)
 
         # Ensure predicted noise is also in high precision
+        # CRITICAL: pred_noise MUST keep gradients for backprop
         pred_noise = pred_noise.float()
         pred_noise = torch.where(
             torch.isfinite(pred_noise), pred_noise, torch.zeros_like(pred_noise)
@@ -297,6 +301,21 @@ class EMVA1288LightningModule(pl.LightningModule):
 
         # Compute loss with high precision tensors
         loss = self.loss_fn(pred_noise, actual_noise)
+        
+        # DEBUG: Verify gradients will flow (only on first batch of first epoch)
+        if batch_idx == 0 and self.current_epoch == 0:
+            print(f"\n=== GRADIENT DEBUG INFO ===")
+            print(f"loss.requires_grad = {loss.requires_grad}")
+            print(f"pred_noise.requires_grad = {pred_noise.requires_grad}")
+            print(f"actual_noise.requires_grad = {actual_noise.requires_grad}")
+            print(f"loss.item() = {loss.item():.6f}")
+            print(f"pred_noise.mean() = {pred_noise.mean().item():.6f}")
+            print(f"actual_noise.mean() = {actual_noise.mean().item():.6f}")
+            
+            # Check if model parameters require grad
+            param_requires_grad = any(p.requires_grad for p in self.model.parameters())
+            print(f"model parameters require_grad = {param_requires_grad}")
+            print("=" * 30 + "\n")
         
         # Check for NaN loss
         if not torch.isfinite(loss):
@@ -536,6 +555,47 @@ class EMVA1288LightningModule(pl.LightningModule):
         """Load EMA state from checkpoint."""
         if self.ema_model is not None and 'ema_state_dict' in checkpoint:
             self.ema_model.load_state_dict(checkpoint['ema_state_dict'])
+    
+    def on_train_start(self):
+        """Verify model is in training mode and parameters require gradients."""
+        print("\n=== TRAINING STARTUP CHECK ===")
+        print(f"Model training mode: {self.training}")
+        print(f"Model requires_grad: {any(p.requires_grad for p in self.model.parameters())}")
+        
+        # Check first parameter as example
+        first_param = next(self.model.parameters())
+        print(f"First param shape: {first_param.shape}, requires_grad: {first_param.requires_grad}")
+        print("=" * 30 + "\n")
+    
+    def on_after_backward(self):
+        """Check gradients after backward pass to verify backprop is working."""
+        if self.global_step % 100 == 0:
+            total_norm = 0.0
+            param_count = 0
+            zero_grad_params = []
+            
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    param_norm = param.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+                    param_count += 1
+                    
+                    # Check for zero gradients (potential issue)
+                    if param_norm.item() < 1e-8:
+                        zero_grad_params.append(name)
+                else:
+                    if self.global_step < 10:  # Only warn early in training
+                        print(f"WARNING: {name} has no gradient!")
+            
+            if param_count > 0:
+                total_norm = total_norm ** (1. / 2)
+                self.log('train/grad_norm', total_norm, on_step=True)
+                
+                # Debug output on first few steps
+                if self.global_step < 10:
+                    print(f"Step {self.global_step}: Gradient norm = {total_norm:.6f}")
+                    if zero_grad_params:
+                        print(f"  Zero-gradient params: {zero_grad_params[:5]}...")  # Show first 5
 
 
 __all__ = ["EMVA1288LightningModule"]
