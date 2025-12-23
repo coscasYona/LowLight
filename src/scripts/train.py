@@ -18,6 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import hydra
+from hydra.utils import get_original_cwd
 from omegaconf import DictConfig, OmegaConf
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import (
@@ -117,12 +118,44 @@ def main(cfg: DictConfig) -> float:
     # Create data module
     data_config = cfg.data if hasattr(cfg, 'data') else cfg
 
+    # Resolve paths relative to workspace root (Hydra changes cwd)
+    # Use script location to find workspace root (script is at src/scripts/train.py, workspace is 2 levels up)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    workspace_root = os.path.dirname(os.path.dirname(script_dir))
+    
+    # Fallback to get_original_cwd if available, but prefer workspace_root
+    try:
+        original_cwd = get_original_cwd()
+        # Use workspace_root if it's more specific (contains 'lowlight')
+        if 'lowlight' in workspace_root:
+            base_dir = workspace_root
+        else:
+            base_dir = original_cwd
+    except:
+        base_dir = workspace_root
+    
+    def resolve_path(path: str) -> str:
+        """Resolve path relative to workspace root if relative."""
+        if os.path.isabs(path):
+            return os.path.normpath(path)
+        # Handle paths starting with ../
+        if path.startswith('../'):
+            # Remove ../ and resolve relative to workspace root
+            rel_path = path[3:]  # Remove '../'
+            return os.path.normpath(os.path.join(base_dir, rel_path))
+        # Regular relative path
+        return os.path.normpath(os.path.join(base_dir, path))
+    
+    train_dir = resolve_path(data_config.train_dir)
+    train_list = resolve_path(data_config.train_list)
+    val_dir = resolve_path(data_config.get('val_dir', data_config.train_dir)) if data_config.get('val_dir') else None
+    val_list = resolve_path(data_config.val_list) if data_config.get('val_list') else None
 
     datamodule = EMVA1288DataModule(
-        train_dir=data_config.train_dir,
-        val_dir=data_config.get('val_dir', data_config.train_dir),
-        train_list=data_config.train_list,
-        val_list=data_config.get('val_list', None),
+        train_dir=train_dir,
+        val_dir=val_dir,
+        train_list=train_list,
+        val_list=val_list,
         batch_size=cfg.training.batch_size,
         num_workers=cfg.hardware.num_workers,
         patch_size=data_config.patch_size,

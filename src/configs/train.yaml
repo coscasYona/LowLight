@@ -9,8 +9,8 @@ defaults:
 # Training hyperparameters
 training:
   epochs: 200
-  batch_size: 3
-  learning_rate: 2e-4
+  batch_size: 4
+  learning_rate: 1e-4
   l1_weight: 0.8
   gradient_weight: 0.05
   loss_scale: 1.0

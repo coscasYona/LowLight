@@ -7,11 +7,32 @@ low-light image denoising training.
 
 import os
 from typing import Optional, Tuple, List
+import json
+import time
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 import rawpy
+
+# #region agent log
+DEBUG_LOG_PATH = "/workspace/lowlight/.cursor/debug.log"
+def debug_log(location, message, data=None, hypothesis_id=None):
+    try:
+        with open(DEBUG_LOG_PATH, "a") as f:
+            log_entry = {
+                "sessionId": "debug-session",
+                "runId": "run1",
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data or {},
+                "timestamp": int(time.time() * 1000)
+            }
+            f.write(json.dumps(log_entry) + "\n")
+    except:
+        pass
+# #endregion
 
 
 def read_paired_fns(list_path: str) -> List[Tuple[str, str]]:
@@ -137,17 +158,38 @@ class SIDRawDenoiseDataset(Dataset):
     ):
         super().__init__()
         
+        # #region agent log
+        debug_log("sid_dataset.py:__init__", "SIDRawDenoiseDataset init started", {"dataset_root": dataset_root, "list_path": list_path}, "A")
+        # #endregion
+        
         self.dataset_root = os.path.abspath(dataset_root)
         self.list_path = os.path.abspath(list_path)
         self.patchsize = patchsize
         self.augment = augment
         
+        # #region agent log
+        debug_log("sid_dataset.py:__init__", "Path resolution", {"dataset_root_abs": self.dataset_root, "list_path_abs": self.list_path, "dataset_root_exists": os.path.isdir(self.dataset_root), "list_path_exists": os.path.isfile(self.list_path)}, "A")
+        # #endregion
+        
         if not os.path.isdir(self.dataset_root):
+            # #region agent log
+            debug_log("sid_dataset.py:__init__", "Dataset root not found", {"dataset_root": self.dataset_root}, "A")
+            # #endregion
             raise FileNotFoundError(f"Dataset root not found: {self.dataset_root}")
         if not os.path.isfile(self.list_path):
+            # #region agent log
+            debug_log("sid_dataset.py:__init__", "List file not found", {"list_path": self.list_path}, "A")
+            # #endregion
             raise FileNotFoundError(f"List file not found: {self.list_path}")
         
+        # #region agent log
+        debug_log("sid_dataset.py:__init__", "Reading paired filenames", {"list_path": self.list_path}, "A")
+        # #endregion
         self.paired_fns = read_paired_fns(self.list_path)
+        
+        # #region agent log
+        debug_log("sid_dataset.py:__init__", "SIDRawDenoiseDataset init completed", {"num_pairs": len(self.paired_fns)}, "A")
+        # #endregion
         
         # Cache for loaded images (optional)
         self.input_cache = {}
