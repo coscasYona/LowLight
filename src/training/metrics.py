@@ -41,6 +41,9 @@ class DenoisingMetrics(nn.Module):
         """Compute PSNR between prediction and target."""
         pred = torch.clamp(pred, 0, self.data_range)
         target = torch.clamp(target, 0, self.data_range)
+        # Ensure metric is on same device as input
+        if self.psnr.device != pred.device:
+            self.psnr = self.psnr.to(pred.device)
         return self.psnr(pred, target)
     
     def compute_ssim(
@@ -51,6 +54,9 @@ class DenoisingMetrics(nn.Module):
         """Compute SSIM between prediction and target."""
         pred = torch.clamp(pred, 0, self.data_range)
         target = torch.clamp(target, 0, self.data_range)
+        # Ensure metric is on same device as input
+        if self.ssim.device != pred.device:
+            self.ssim = self.ssim.to(pred.device)
         return self.ssim(pred, target)
     
     def compute_snr(
@@ -77,11 +83,11 @@ class DenoisingMetrics(nn.Module):
         """
         Compute SNR improvement from denoising.
         
-        Returns the difference: SNR(denoised) - SNR(noisy)
+        Returns the difference: SNR(original) - SNR(denoised)
         """
-        snr_noisy = self.compute_snr(clean, noisy)
-        snr_denoised = self.compute_snr(clean, denoised)
-        return snr_denoised - snr_noisy
+        snr_original = self.compute_snr(clean, noisy)
+        snr_denoised = self.compute_snr(denoised, noisy)
+        return snr_original - snr_denoised
     
     def forward(
         self,

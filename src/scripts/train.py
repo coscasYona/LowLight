@@ -215,7 +215,10 @@ def main(cfg: DictConfig) -> float:
     print("\n" + "=" * 60)
     print("Training completed!")
     print(f"Best model: {best_model_path}")
-    print(f"Best validation loss: {best_val_loss:.4f}")
+    if best_val_loss is not None:
+        print(f"Best validation loss: {best_val_loss:.4f}")
+    else:
+        print("Best validation loss: N/A")
     print("=" * 60)
     
     return float(best_val_loss) if best_val_loss is not None else float('inf')
