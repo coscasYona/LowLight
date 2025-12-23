@@ -307,9 +307,9 @@ class EMVA1288LightningModule(pl.LightningModule):
         if self.use_ema and self.training:
             self._update_ema()
         
-        # Log metrics (step-level only to reduce clutter)
-        self.log('train/loss', loss, on_step=True, on_epoch=False, prog_bar=True)
-        self.log('train/loss_unscaled', loss / self.loss_fn.loss_scale)
+        # Log metrics (both step-level and epoch-level for TensorBoard visibility)
+        self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/loss_unscaled', loss / self.loss_fn.loss_scale, on_step=True, on_epoch=True)
 
         # Store last batch for training image logging (only in training mode)
         if self.training and batch_idx == 0:  # Store first batch of each epoch
@@ -501,20 +501,20 @@ class EMVA1288LightningModule(pl.LightningModule):
             lr=self.learning_rate
         )
         
-        # LR schedule with warmup for physics noise training:
-        # - Epoch 1-9: warmup from 2e-5 to 2e-4 (×0.1 to ×1.0)
-        # - Epoch 10-99: 2e-4
-        # - Epoch 100-179: 1e-4 (×0.5)
-        # - Epoch 180+: 2e-5 (×0.1)
+        # LR schedule matching legacy training:
+        # - Epoch 0-9: warmup from 1e-5 to 1e-4 (×0.1 to ×1.0)
+        # - Epoch 10-99: 1e-4 (×1.0)
+        # - Epoch 100-179: 5e-5 (×0.5)
+        # - Epoch 180+: 1e-5 (×0.1)
         def lr_lambda(epoch):
             if epoch < 10:
                 return 0.1 + 0.9 * (epoch / 9)  # Warmup from 0.1x to 1.0x
             elif epoch < 100:
-                return 1.0
+                return 1.0  # 1e-4
             elif epoch < 180:
-                return 0.5
+                return 0.5  # 5e-5
             else:
-                return 0.1
+                return 0.1  # 1e-5
         
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         
