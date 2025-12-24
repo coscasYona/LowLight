@@ -1,0 +1,538 @@
+from __future__ import print_function
+import os
+import sys
+import time
+import math
+
+import torch
+import numpy as np
+import scipy
+import scipy.io as spio
+import yaml
+from PIL import Image
+
+
+def get_config(config):
+    with open(config, 'r') as stream:
+        return yaml.load(stream)
+
+
+# Converts a Tensor into a Numpy array
+# |imtype|: the desired type of the converted numpy array
+def tensor2im(image_tensor, imtype=np.uint8):
+    image_numpy = image_tensor[0].cpu().float().numpy()
+    if image_numpy.shape[0] == 1:
+        image_numpy = np.tile(image_numpy, (3, 1, 1))
+    image_numpy = (np.transpose(image_numpy, (1, 2, 0)) + 1) / 2.0 * 255.0
+    image_numpy = image_numpy.astype(imtype)
+    if image_numpy.shape[-1] == 6:
+        image_numpy = np.concatenate([image_numpy[:,:,:3], image_numpy[:,:,3:]], axis=1)
+    if image_numpy.shape[-1] == 7:  
+        edge_map = np.tile(image_numpy[:,:,6:7], (1, 1, 3))
+        image_numpy = np.concatenate([image_numpy[:,:,:3], image_numpy[:,:,3:6], edge_map], axis=1)
+    return image_numpy
+
+
+# Get model list for resume
+def get_model_list(dirname, key, epoch=None):   
+    if epoch is None:
+        return os.path.join(dirname, key+'_latest.pt')
+    if os.path.exists(dirname) is False:
+        return None
+    gen_models = [os.path.join(dirname, f) for f in os.listdir(dirname) if
+                  os.path.isfile(os.path.join(dirname, f)) and key in f and ".pt" in f and 'latest' not in f]
+    if gen_models is None:
+        return None
+
+    epoch_index = [int(os.path.basename(model_name).split('_')[-2]) for model_name in gen_models if os.path.basename(model_name).split('_')[-2].isdigit()]
+    print('[i] available epoch list: %s' %epoch_index, gen_models)
+    i = epoch_index.index(int(epoch))    
+    
+    return gen_models[i]
+
+
+def vgg_preprocess(batch):
+    # normalize using imagenet mean and std
+    mean = batch.new(batch.size())
+    std = batch.new(batch.size())
+    mean[:, 0, :, :] = 0.485
+    mean[:, 1, :, :] = 0.456
+    mean[:, 2, :, :] = 0.406
+    std[:, 0, :, :] = 0.229
+    std[:, 1, :, :] = 0.224
+    std[:, 2, :, :] = 0.225
+    batch = (batch + 1) / 2
+    batch -= mean
+    batch = batch / std
+    return batch
+
+
+def diagnose_network(net, name='network'):
+    mean = 0.0
+    count = 0
+    for param in net.parameters():
+        if param.grad is not None:
+            mean += torch.mean(torch.abs(param.grad.data))
+            count += 1
+    if count > 0:
+        mean = mean / count
+    print(name)
+    print(mean)
+
+
+def save_image(image_numpy, image_path):
+    image_pil = Image.fromarray(image_numpy)
+    image_pil.save(image_path)
+
+
+def print_numpy(x, val=True, shp=False):
+    x = x.astype(np.float64)
+    if shp:
+        print('shape,', x.shape)
+    if val:
+        x = x.flatten()
+        print('mean = %3.3f, min = %3.3f, max = %3.3f, median = %3.3f, std=%3.3f' % (
+            np.mean(x), np.min(x), np.max(x), np.median(x), np.std(x)))
+
+
+def mkdirs(paths):
+    if isinstance(paths, list) and not isinstance(paths, str):
+        for path in paths:
+            mkdir(path)
+    else:
+        mkdir(paths)
+
+
+def mkdir(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+
+def set_opt_param(optimizer, key, value):
+    for group in optimizer.param_groups:
+        group[key] = value
+
+
+def vis(x):
+    if isinstance(x, torch.Tensor):
+        Image.fromarray(tensor2im(x)).show()
+    elif isinstance(x, np.ndarray):
+        Image.fromarray(x.astype(np.uint8)).show()
+    else:
+        raise NotImplementedError('vis for type [%s] is not implemented', type(x))
+
+
+def crop_center(img,cropx,cropy):
+    _, _, y, x = img.shape
+    startx = x//2-(cropx//2)
+    starty = y//2-(cropy//2)
+    return img[:, :, starty:starty+cropy,startx:startx+cropx].contiguous()
+
+
+"""tensorboard"""
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
+import socket
+
+def get_summary_writer(log_dir):    
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)    
+    log_dir = os.path.join(log_dir, datetime.now().strftime('%b%d_%H-%M-%S')+'_'+socket.gethostname())
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+    writer = SummaryWriter(log_dir)
+    return writer
+
+
+class AverageMeters(object):
+    def __init__(self, dic=None, total_num=None):
+        self.dic = dic or {}
+        # self.total_num = total_num
+        self.total_num = total_num or {}
+    
+    def update(self, new_dic):
+        for key in new_dic:
+            if not key in self.dic:
+                self.dic[key] = new_dic[key]
+                self.total_num[key] = 1
+            else:
+                self.dic[key] += new_dic[key]
+                self.total_num[key] += 1
+        # self.total_num += 1
+    
+    def __getitem__(self, key):
+        return self.dic[key] / self.total_num[key]
+
+    def __str__(self):
+        keys = sorted(self.keys())
+        res = ''
+        for key in keys:
+            res += (key + ': %.4f' % self[key] + ' | ')
+        return res
+
+    def keys(self):
+        return self.dic.keys()
+
+
+def write_loss(writer, prefix, avg_meters, iteration):
+    for key in avg_meters.keys():
+        meter = avg_meters[key]
+        writer.add_scalar(
+            os.path.join(prefix, key), meter, iteration)
+
+
+def _raw_to_rgb(raw_4ch):
+    """Convert 4-channel RAW (RGGB) to 3-channel RGB for visualization.
+    
+    RGGB format: [R, G1, B, G2] -> RGB: [R, (G1+G2)/2, B]
+    """
+    import torch
+    if raw_4ch.dim() == 3:
+        raw_4ch = raw_4ch.unsqueeze(0)
+    B, C, H, W = raw_4ch.shape
+    if C == 4:
+        R = raw_4ch[:, 0:1, :, :]
+        G1 = raw_4ch[:, 1:2, :, :]
+        B_ch = raw_4ch[:, 2:3, :, :]
+        G2 = raw_4ch[:, 3:4, :, :]
+        G = (G1 + G2) / 2.0
+        rgb = torch.cat([R, G, B_ch], dim=1)
+    else:
+        rgb = raw_4ch
+    return rgb.squeeze(0) if rgb.shape[0] == 1 else rgb
+
+
+def log_images(writer, epoch, model, image_data, save_path=None, compute_metrics=False, prefix='Train'):
+    """
+    Log images to TensorBoard and optionally save to disk.
+    
+    Args:
+        writer: TensorBoard SummaryWriter
+        epoch: Current epoch number
+        model: Model to use for denoising (will be set to eval mode)
+        image_data: Dict containing:
+            - 'img_gt': Ground truth images [B, C, H, W]
+            - 'noisy_state': Noisy input images [B, C, H, W]
+            - 'iso': ISO values [B]
+            - 'ratio': Ratio values [B]
+            - 'camera_params': (optional) Camera parameters dict for EMVA1288
+            - 'num_steps': (optional) Number of sampling steps, default 50
+            - 'eta': (optional) Sampling eta, default 0.0
+        save_path: (optional) Base path to save images
+        compute_metrics: (optional) Whether to compute and log PSNR/SNR metrics
+        prefix: 'Train' or 'Validation' - determines TensorBoard naming and save directory
+    """
+    if image_data is None:
+        return
+    
+    import torch
+    
+    model.eval()
+    with torch.no_grad():
+        base_model = model.module if hasattr(model, 'module') else model
+        
+        # Get sampling parameters - use model's num_steps as default to avoid index out of bounds
+        default_num_steps = base_model.num_steps if hasattr(base_model, 'num_steps') else 50
+        num_steps = image_data.get('num_steps', default_num_steps)
+        # Ensure num_steps doesn't exceed model's capacity
+        if hasattr(base_model, 'num_steps'):
+            num_steps = min(num_steps, base_model.num_steps)
+        eta = image_data.get('eta', 0.0)
+        camera_params = image_data.get('camera_params', None)
+        
+        # Validate and fix iso/ratio values before sampling
+        iso = image_data['iso']
+        ratio = image_data['ratio']
+        
+        # Replace NaN/Inf with safe defaults
+        iso = torch.where(torch.isfinite(iso), iso, torch.ones_like(iso) * 6400.0)
+        ratio = torch.where(torch.isfinite(ratio), ratio, torch.ones_like(ratio) * 200.0)
+        # Clamp to valid ranges
+        iso = torch.clamp(iso, min=1.0, max=1e6)
+        ratio = torch.clamp(ratio, min=1.0, max=1e6)
+        
+        # Generate denoised images
+        sample_kwargs = {
+            'iso': iso,
+            'ratio': ratio,
+            'num_steps': num_steps,
+            'eta': eta
+        }
+        if camera_params is not None:
+            sample_kwargs['camera_params'] = camera_params
+        
+        denoised = base_model.sample(
+            image_data['noisy_state'],
+            **sample_kwargs
+        )
+        
+        # Normalize to [0, 1] for visualization (handle both [-1,1] and [0,1] ranges)
+        img_gt = image_data['img_gt']
+        noisy_state = image_data['noisy_state']
+        
+        img_gt_min = img_gt.min()
+        if img_gt_min < 0:
+            img_gt_norm = torch.clamp((img_gt + 1.0) / 2.0, 0.0, 1.0)
+        else:
+            img_gt_norm = torch.clamp(img_gt, 0.0, 1.0)
+        
+        noisy_min = noisy_state.min()
+        if noisy_min < 0:
+            noisy_norm = torch.clamp((noisy_state + 1.0) / 2.0, 0.0, 1.0)
+        else:
+            noisy_norm = torch.clamp(noisy_state, 0.0, 1.0)
+        
+        denoised_norm = torch.clamp(denoised, 0.0, 1.0)
+        
+        # Compute and log PSNR/SNR metrics if requested
+        if compute_metrics and writer is not None:
+            try:
+                from util.metrics import ImageQualityMetrics, log_metrics_to_tensorboard, print_metrics_summary
+                metrics_calculator = ImageQualityMetrics(device=img_gt_norm.device, data_range=1.0)
+                metrics = metrics_calculator.compute_all_metrics(
+                    clean=img_gt_norm,
+                    noisy=noisy_norm,
+                    denoised=denoised_norm
+                )
+                log_metrics_to_tensorboard(writer, epoch, metrics, prefix=prefix)
+                print_metrics_summary(metrics, prefix=prefix)
+            except Exception as e:
+                print(f"Warning: Failed to compute {prefix.lower()} metrics: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        img_gt_rgb = _raw_to_rgb(img_gt_norm)
+        noisy_rgb = _raw_to_rgb(noisy_norm)
+        denoised_rgb = _raw_to_rgb(denoised_norm)
+        
+        # Ensure all tensors have batch dimension for consistent concatenation
+        if img_gt_rgb.dim() == 3:
+            img_gt_rgb = img_gt_rgb.unsqueeze(0)
+        if noisy_rgb.dim() == 3:
+            noisy_rgb = noisy_rgb.unsqueeze(0)
+        if denoised_rgb.dim() == 3:
+            denoised_rgb = denoised_rgb.unsqueeze(0)
+        
+        # Create grid: horizontally concatenate [clean | noisy | denoised] for each sample
+        image_grid = torch.cat([img_gt_rgb, noisy_rgb, denoised_rgb], dim=3)
+        writer.add_images(f'{prefix}/Images', image_grid, epoch, dataformats='NCHW')
+        
+        # Save images to disk if save_path is provided
+        if save_path is not None:
+            subdir = 'val_images' if prefix == 'Validation' else 'images'
+            images_dir = os.path.join(save_path, subdir)
+            os.makedirs(images_dir, exist_ok=True)
+            
+            B = img_gt_rgb.shape[0]
+            for i in range(B):
+                img_np_gt = img_gt_rgb[i].cpu().clamp(0.0, 1.0).numpy()
+                img_np_gt = np.transpose(img_np_gt, (1, 2, 0))
+                img_np_gt = (img_np_gt * 255.0).astype(np.uint8)
+                
+                img_np_noisy = noisy_rgb[i].cpu().clamp(0.0, 1.0).numpy()
+                img_np_noisy = np.transpose(img_np_noisy, (1, 2, 0))
+                img_np_noisy = (img_np_noisy * 255.0).astype(np.uint8)
+                
+                img_np_denoised = denoised_rgb[i].cpu().clamp(0.0, 1.0).numpy()
+                img_np_denoised = np.transpose(img_np_denoised, (1, 2, 0))
+                img_np_denoised = (img_np_denoised * 255.0).astype(np.uint8)
+                
+                # Save as BMP files
+                file_prefix = 'val_' if prefix == 'Validation' else ''
+                base_filename = f"{file_prefix}epoch_{epoch:04d}_sample_{i:03d}"
+                Image.fromarray(img_np_gt, mode='RGB').save(
+                    os.path.join(images_dir, f"{base_filename}_clean.bmp"))
+                Image.fromarray(img_np_noisy, mode='RGB').save(
+                    os.path.join(images_dir, f"{base_filename}_noisy.bmp"))
+                Image.fromarray(img_np_denoised, mode='RGB').save(
+                    os.path.join(images_dir, f"{base_filename}_denoised.bmp"))
+    
+    model.train()
+
+
+def log_training_images(writer, epoch, model, image_data, save_path=None, compute_metrics=False):
+    """Log training images to TensorBoard. Wrapper for backward compatibility."""
+    return log_images(writer, epoch, model, image_data, save_path, compute_metrics, prefix='Train')
+
+
+def log_validation_images(writer, epoch, model, image_data, save_path=None, compute_metrics=True):
+    """Log validation images to TensorBoard. Wrapper for backward compatibility."""
+    return log_images(writer, epoch, model, image_data, save_path, compute_metrics, prefix='Validation')
+
+
+"""progress bar"""
+import socket
+#aaa = '--name sid-ours-sonya7s2 --stage_in raw --stage_out raw --include 4'
+#term_width = aaa.split()
+#aaa = os.popen('stty size', 'r').read()
+#_, term_width = aaa.split()
+# print(aaa)
+# print("###############")
+# print(term_width)
+# term_width = int(term_width)
+term_width = 136
+
+
+
+TOTAL_BAR_LENGTH = 65.
+last_time = time.time()
+begin_time = last_time
+def progress_bar(current, total, msg=None):
+    global last_time, begin_time
+    if current == 0:
+        begin_time = time.time()  # Reset for new bar.
+
+    cur_len = int(TOTAL_BAR_LENGTH * current/total)
+    rest_len = int(TOTAL_BAR_LENGTH - cur_len) - 1
+
+    sys.stdout.write(' [')
+    for i in range(cur_len):
+        sys.stdout.write('=')
+    sys.stdout.write('>')
+    for i in range(rest_len):
+        sys.stdout.write('.')
+    sys.stdout.write(']')
+
+    cur_time = time.time()
+    step_time = cur_time - last_time
+    last_time = cur_time
+    tot_time = cur_time - begin_time
+
+    L = []
+    L.append('  Step: %s' % format_time(step_time))
+    L.append(' | Tot: %s' % format_time(tot_time))
+    if msg:
+        L.append(' | ' + msg)
+
+    msg = ''.join(L)
+    sys.stdout.write(msg)
+    for i in range(term_width-int(TOTAL_BAR_LENGTH)-len(msg)-3):
+        sys.stdout.write(' ')
+
+    # Go back to the center of the bar.
+    for i in range(term_width-int(TOTAL_BAR_LENGTH/2)+2):
+        sys.stdout.write('\b')
+    sys.stdout.write(' %d/%d ' % (current+1, total))
+
+    if current < total-1:
+        sys.stdout.write('\r')
+    else:
+        sys.stdout.write('\n')
+    sys.stdout.flush()
+
+def format_time(seconds):
+    days = int(seconds / 3600/24)
+    seconds = seconds - days*3600*24
+    hours = int(seconds / 3600)
+    seconds = seconds - hours*3600
+    minutes = int(seconds / 60)
+    seconds = seconds - minutes*60
+    secondsf = int(seconds)
+    seconds = seconds - secondsf
+    millis = int(seconds*1000)
+
+    f = ''
+    i = 1
+    if days > 0:
+        f += str(days) + 'D'
+        i += 1
+    if hours > 0 and i <= 2:
+        f += str(hours) + 'h'
+        i += 1
+    if minutes > 0 and i <= 2:
+        f += str(minutes) + 'm'
+        i += 1
+    if secondsf > 0 and i <= 2:
+        f += str(secondsf) + 's'
+        i += 1
+    if millis > 0 and i <= 2:
+        f += str(millis) + 'ms'
+        i += 1
+    if f == '':
+        f = '0ms'
+    return f
+
+
+def parse_args(args):
+    str_args = args.split(',')
+    parsed_args = []
+    for str_arg in str_args:
+        arg = int(str_arg)
+        if arg >= 0:
+            parsed_args.append(arg)
+    return parsed_args
+
+
+def to_meta_tensor(meta_value, device, batch_size, fill_value=None):
+    """Convert scalar metadata (ISO, ratio, etc.) to a batched tensor."""
+    if meta_value is None:
+        if fill_value is None:
+            return None
+        return torch.full((batch_size, 1), float(fill_value), device=device, dtype=torch.float32)
+
+    if not torch.is_tensor(meta_value):
+        meta_value = torch.tensor(meta_value, dtype=torch.float32)
+    meta_value = meta_value.to(device=device, dtype=torch.float32)
+
+    if meta_value.dim() == 0:
+        meta_value = meta_value.view(1, 1)
+    elif meta_value.dim() == 1:
+        meta_value = meta_value.unsqueeze(-1)
+
+    if meta_value.shape[0] == 1 and batch_size > 1:
+        meta_value = meta_value.repeat(batch_size, 1)
+    elif meta_value.shape[0] != batch_size:
+        meta_value = meta_value.reshape(batch_size, -1)
+    return meta_value
+
+
+# https://stackoverflow.com/questions/7008608/scipy-io-loadmat-nested-structures-i-e-dictionaries
+def loadmat(filename):
+    '''
+    this function should be called instead of direct spio.loadmat
+    as it cures the problem of not properly recovering python dictionaries
+    from mat files. It calls the function check keys to cure all entries
+    which are still mat-objects
+    '''
+    def _check_keys(d):
+        '''
+        checks if entries in dictionary are mat-objects. If yes
+        todict is called to change them to nested dictionaries
+        '''
+        for key in d:
+            if isinstance(d[key], spio.matlab.mio5_params.mat_struct):
+                d[key] = _todict(d[key])
+        return d
+
+    def _todict(matobj):
+        '''
+        A recursive function which constructs from matobjects nested dictionaries
+        '''
+        d = {}
+        for strg in matobj._fieldnames:
+            elem = matobj.__dict__[strg]
+            if isinstance(elem, spio.matlab.mio5_params.mat_struct):
+                d[strg] = _todict(elem)
+            elif isinstance(elem, np.ndarray):
+                d[strg] = _tolist(elem)
+            else:
+                d[strg] = elem
+        return d
+
+    def _tolist(ndarray):
+        '''
+        A recursive function which constructs lists from cellarrays
+        (which are loaded as numpy ndarrays), recursing into the elements
+        if they contain matobjects.
+        '''
+        elem_list = []
+        for sub_elem in ndarray:
+            if isinstance(sub_elem, spio.matlab.mio5_params.mat_struct):
+                elem_list.append(_todict(sub_elem))
+            elif isinstance(sub_elem, np.ndarray):
+                elem_list.append(_tolist(sub_elem))
+            else:
+                elem_list.append(sub_elem)
+        return elem_list
+    data = scipy.io.loadmat(filename, struct_as_record=False, squeeze_me=True)
+    return _check_keys(data)
