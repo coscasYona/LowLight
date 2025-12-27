@@ -90,9 +90,42 @@ class EMVA1288DataModule(pl.LightningDataModule):
             train_datasets = []
             
             if self.use_sid_raw and self.train_list:
-                train_dir = os.path.abspath(self.train_dir)
-                train_list = os.path.abspath(self.train_list)
-
+                # Resolve paths relative to workspace root if they're relative
+                workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+                
+                if not os.path.isabs(self.train_dir):
+                    # Remove leading ../ or ./ and resolve from workspace root
+                    clean_path = self.train_dir
+                    while clean_path.startswith('../') or clean_path.startswith('./'):
+                        if clean_path.startswith('../'):
+                            clean_path = clean_path[3:]
+                        elif clean_path.startswith('./'):
+                            clean_path = clean_path[2:]
+                    train_dir_candidate = os.path.join(workspace_root, clean_path)
+                    if os.path.exists(train_dir_candidate):
+                        train_dir = os.path.abspath(train_dir_candidate)
+                    else:
+                        # Fallback to original resolution
+                        train_dir = os.path.abspath(self.train_dir)
+                else:
+                    train_dir = self.train_dir
+                
+                if not os.path.isabs(self.train_list):
+                    # Remove leading ../ or ./ and resolve from workspace root
+                    clean_path = self.train_list
+                    while clean_path.startswith('../') or clean_path.startswith('./'):
+                        if clean_path.startswith('../'):
+                            clean_path = clean_path[3:]
+                        elif clean_path.startswith('./'):
+                            clean_path = clean_path[2:]
+                    train_list_candidate = os.path.join(workspace_root, clean_path)
+                    if os.path.exists(train_list_candidate):
+                        train_list = os.path.abspath(train_list_candidate)
+                    else:
+                        # Fallback to original resolution
+                        train_list = os.path.abspath(self.train_list)
+                else:
+                    train_list = self.train_list
                 
                 if os.path.exists(train_list):
                     sid_train = SIDRawDenoiseDataset(
@@ -144,9 +177,42 @@ class EMVA1288DataModule(pl.LightningDataModule):
             
             # Build explicit validation dataset
             if self.val_list is not None:
-                val_dir = os.path.abspath(self.val_dir)
-                val_list = os.path.abspath(self.val_list)
-
+                # Resolve paths relative to workspace root if they're relative
+                workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+                
+                if not os.path.isabs(self.val_dir):
+                    # Remove leading ../ or ./ and resolve from workspace root
+                    clean_path = self.val_dir
+                    while clean_path.startswith('../') or clean_path.startswith('./'):
+                        if clean_path.startswith('../'):
+                            clean_path = clean_path[3:]
+                        elif clean_path.startswith('./'):
+                            clean_path = clean_path[2:]
+                    val_dir_candidate = os.path.join(workspace_root, clean_path)
+                    if os.path.exists(val_dir_candidate):
+                        val_dir = os.path.abspath(val_dir_candidate)
+                    else:
+                        # Fallback to original resolution
+                        val_dir = os.path.abspath(self.val_dir)
+                else:
+                    val_dir = self.val_dir
+                
+                if not os.path.isabs(self.val_list):
+                    # Remove leading ../ or ./ and resolve from workspace root
+                    clean_path = self.val_list
+                    while clean_path.startswith('../') or clean_path.startswith('./'):
+                        if clean_path.startswith('../'):
+                            clean_path = clean_path[3:]
+                        elif clean_path.startswith('./'):
+                            clean_path = clean_path[2:]
+                    val_list_candidate = os.path.join(workspace_root, clean_path)
+                    if os.path.exists(val_list_candidate):
+                        val_list = os.path.abspath(val_list_candidate)
+                    else:
+                        # Fallback to original resolution
+                        val_list = os.path.abspath(self.val_list)
+                else:
+                    val_list = self.val_list
                 
                 if os.path.exists(val_list):
                     self.val_dataset = SIDRawDenoiseDataset(
