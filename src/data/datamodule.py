@@ -7,8 +7,6 @@ with support for multiple dataset types (SID, ELD, Fuji).
 
 import os
 from typing import Optional, Callable
-import json
-import time
 
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader, Dataset, ConcatDataset, random_split
@@ -16,25 +14,6 @@ import torch
 
 from data.sid_dataset import SIDRawDenoiseDataset
 from data.transforms import get_train_transforms, get_val_transforms
-
-# #region agent log
-DEBUG_LOG_PATH = "/workspace/lowlight/.cursor/debug.log"
-def debug_log(location, message, data=None, hypothesis_id=None):
-    try:
-        with open(DEBUG_LOG_PATH, "a") as f:
-            log_entry = {
-                "sessionId": "debug-session",
-                "runId": "run1",
-                "hypothesisId": hypothesis_id,
-                "location": location,
-                "message": message,
-                "data": data or {},
-                "timestamp": int(time.time() * 1000)
-            }
-            f.write(json.dumps(log_entry) + "\n")
-    except:
-        pass
-# #endregion
 
 
 class EMVA1288DataModule(pl.LightningDataModule):
@@ -106,46 +85,57 @@ class EMVA1288DataModule(pl.LightningDataModule):
         Args:
             stage: 'fit', 'validate', 'test', or None
         """
-        # #region agent log
-        debug_log("datamodule.py:setup", "Setup called", {"stage": stage, "use_sid_raw": self.use_sid_raw, "train_list": self.train_list, "train_dir": self.train_dir}, "A")
-        # #endregion
-        
         if stage == 'fit' or stage is None:
             # Build training dataset
             train_datasets = []
             
             if self.use_sid_raw and self.train_list:
-                train_dir = os.path.abspath(self.train_dir)
-                train_list = os.path.abspath(self.train_list)
-
-                # #region agent log
-                debug_log("datamodule.py:setup", "Path resolution", {"train_dir_abs": train_dir, "train_list_abs": train_list, "train_dir_exists": os.path.exists(train_dir), "train_list_exists": os.path.exists(train_list)}, "A")
-                # #endregion
+                # Resolve paths relative to workspace root if they're relative
+                workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+                
+                if not os.path.isabs(self.train_dir):
+                    # Remove leading ../ or ./ and resolve from workspace root
+                    clean_path = self.train_dir
+                    while clean_path.startswith('../') or clean_path.startswith('./'):
+                        if clean_path.startswith('../'):
+                            clean_path = clean_path[3:]
+                        elif clean_path.startswith('./'):
+                            clean_path = clean_path[2:]
+                    train_dir_candidate = os.path.join(workspace_root, clean_path)
+                    if os.path.exists(train_dir_candidate):
+                        train_dir = os.path.abspath(train_dir_candidate)
+                    else:
+                        # Fallback to original resolution
+                        train_dir = os.path.abspath(self.train_dir)
+                else:
+                    train_dir = self.train_dir
+                
+                if not os.path.isabs(self.train_list):
+                    # Remove leading ../ or ./ and resolve from workspace root
+                    clean_path = self.train_list
+                    while clean_path.startswith('../') or clean_path.startswith('./'):
+                        if clean_path.startswith('../'):
+                            clean_path = clean_path[3:]
+                        elif clean_path.startswith('./'):
+                            clean_path = clean_path[2:]
+                    train_list_candidate = os.path.join(workspace_root, clean_path)
+                    if os.path.exists(train_list_candidate):
+                        train_list = os.path.abspath(train_list_candidate)
+                    else:
+                        # Fallback to original resolution
+                        train_list = os.path.abspath(self.train_list)
+                else:
+                    train_list = self.train_list
                 
                 if os.path.exists(train_list):
-                    # #region agent log
-                    debug_log("datamodule.py:setup", "Creating SIDRawDenoiseDataset", {"dataset_root": train_dir, "list_path": train_list}, "A")
-                    # #endregion
-                    try:
-                        sid_train = SIDRawDenoiseDataset(
-                            dataset_root=train_dir,
-                            list_path=train_list,
-                            patchsize=self.patch_size,
-                        )
-                        train_datasets.append(sid_train)
-                        # #region agent log
-                        debug_log("datamodule.py:setup", "SID dataset created", {"dataset_len": len(sid_train)}, "A")
-                        # #endregion
-                        print(f"Loaded SID training dataset: {len(sid_train)} samples")
-                    except Exception as e:
-                        # #region agent log
-                        debug_log("datamodule.py:setup", "SID dataset creation failed", {"error": str(e), "error_type": type(e).__name__}, "A")
-                        # #endregion
-                        raise
+                    sid_train = SIDRawDenoiseDataset(
+                        dataset_root=train_dir,
+                        list_path=train_list,
+                        patchsize=self.patch_size,
+                    )
+                    train_datasets.append(sid_train)
+                    print(f"Loaded SID training dataset: {len(sid_train)} samples")
                 else:
-                    # #region agent log
-                    debug_log("datamodule.py:setup", "Train list file not found", {"train_list": train_list}, "A")
-                    # #endregion
                     pass
             
             if self.use_fuji_raw and self.fuji_train_list:
@@ -160,10 +150,6 @@ class EMVA1288DataModule(pl.LightningDataModule):
                     )
                     train_datasets.append(fuji_train)
                     print(f"Loaded Fuji training dataset: {len(fuji_train)} samples")
-            
-            # #region agent log
-            debug_log("datamodule.py:setup", "After dataset creation", {"train_datasets_count": len(train_datasets)}, "A")
-            # #endregion
             
             if train_datasets:
                 if len(train_datasets) > 1:
@@ -183,26 +169,50 @@ class EMVA1288DataModule(pl.LightningDataModule):
                         [train_size, val_size],
                         generator=torch.Generator().manual_seed(42)
                     )
-                    # #region agent log
-                    debug_log("datamodule.py:setup", "Dataset split", {"train_size": train_size, "val_size": val_size}, "A")
-                    # #endregion
                     print(f"Split: {train_size} train, {val_size} validation")
                 else:
                     self.train_dataset = combined
-                    # #region agent log
-                    debug_log("datamodule.py:setup", "Using combined dataset", {"dataset_len": len(combined)}, "A")
-                    # #endregion
             else:
-                # #region agent log
-                debug_log("datamodule.py:setup", "No train datasets created", {}, "A")
-                # #endregion
                 pass
             
             # Build explicit validation dataset
             if self.val_list is not None:
-                val_dir = os.path.abspath(self.val_dir)
-                val_list = os.path.abspath(self.val_list)
-
+                # Resolve paths relative to workspace root if they're relative
+                workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+                
+                if not os.path.isabs(self.val_dir):
+                    # Remove leading ../ or ./ and resolve from workspace root
+                    clean_path = self.val_dir
+                    while clean_path.startswith('../') or clean_path.startswith('./'):
+                        if clean_path.startswith('../'):
+                            clean_path = clean_path[3:]
+                        elif clean_path.startswith('./'):
+                            clean_path = clean_path[2:]
+                    val_dir_candidate = os.path.join(workspace_root, clean_path)
+                    if os.path.exists(val_dir_candidate):
+                        val_dir = os.path.abspath(val_dir_candidate)
+                    else:
+                        # Fallback to original resolution
+                        val_dir = os.path.abspath(self.val_dir)
+                else:
+                    val_dir = self.val_dir
+                
+                if not os.path.isabs(self.val_list):
+                    # Remove leading ../ or ./ and resolve from workspace root
+                    clean_path = self.val_list
+                    while clean_path.startswith('../') or clean_path.startswith('./'):
+                        if clean_path.startswith('../'):
+                            clean_path = clean_path[3:]
+                        elif clean_path.startswith('./'):
+                            clean_path = clean_path[2:]
+                    val_list_candidate = os.path.join(workspace_root, clean_path)
+                    if os.path.exists(val_list_candidate):
+                        val_list = os.path.abspath(val_list_candidate)
+                    else:
+                        # Fallback to original resolution
+                        val_list = os.path.abspath(self.val_list)
+                else:
+                    val_list = self.val_list
                 
                 if os.path.exists(val_list):
                     self.val_dataset = SIDRawDenoiseDataset(
@@ -218,9 +228,6 @@ class EMVA1288DataModule(pl.LightningDataModule):
     
     def train_dataloader(self) -> DataLoader:
         """Create training dataloader."""
-        # #region agent log
-        debug_log("datamodule.py:train_dataloader", "Train dataloader called", {"train_dataset_is_none": self.train_dataset is None}, "A")
-        # #endregion
         if self.train_dataset is None:
             raise RuntimeError("Train dataset not initialized. Call setup() first.")
         

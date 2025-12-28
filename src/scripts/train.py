@@ -89,10 +89,9 @@ def create_callbacks(cfg: DictConfig) -> list:
     return callbacks
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="train")
-def main(cfg: DictConfig) -> float:
+def train_with_config(cfg: DictConfig) -> float:
     """
-    Main training function.
+    Core training function that can be called with a config object.
     
     Args:
         cfg: Hydra configuration
@@ -255,6 +254,20 @@ def main(cfg: DictConfig) -> float:
     print("=" * 60)
     
     return float(best_val_loss) if best_val_loss is not None else float('inf')
+
+
+@hydra.main(version_base=None, config_path="../configs", config_name="train")
+def main(cfg: DictConfig) -> float:
+    """
+    Main training function (Hydra entry point).
+    
+    Args:
+        cfg: Hydra configuration
+        
+    Returns:
+        Best validation loss achieved
+    """
+    return train_with_config(cfg)
 
 
 if __name__ == "__main__":
