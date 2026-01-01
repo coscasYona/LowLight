@@ -238,6 +238,8 @@ class EMVA1288DataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             drop_last=False,
+            persistent_workers=self.num_workers > 0,  # Keep workers alive between epochs
+            prefetch_factor=2 if self.num_workers > 0 else None,  # Prefetch batches
         )
     
     def val_dataloader(self) -> DataLoader:
@@ -253,6 +255,8 @@ class EMVA1288DataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             drop_last=False,
+            persistent_workers=self.num_workers > 0,  # Keep workers alive between epochs
+            prefetch_factor=2 if self.num_workers > 0 else None,  # Prefetch batches
         )
     
     def test_dataloader(self) -> Optional[DataLoader]:
@@ -266,6 +270,8 @@ class EMVA1288DataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            persistent_workers=self.num_workers > 0,
+            prefetch_factor=2 if self.num_workers > 0 else None,
         )
 
 

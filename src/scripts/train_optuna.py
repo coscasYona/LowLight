@@ -2,12 +2,18 @@
 """
 Optuna hyperparameter optimization wrapper for EMVA 1288 training.
 Wraps the Hydra-based train.py script for hyperparameter sweeps.
+
+Uses torchrun to launch each trial with multi-GPU support.
 """
 
 import os
 import sys
 import json
 import argparse
+import subprocess
+import re
+import socket
+import signal
 import optuna
 from optuna.trial import TrialState
 
@@ -20,8 +26,122 @@ from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 import pytorch_lightning as pl
 
-# Import training function
-from train import train_with_config
+
+def _find_free_port():
+    """Find a free port for torchrun master."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
+
+
+def _kill_process_group(process):
+    """Kill the entire process group to ensure all GPU workers are terminated."""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        pass  # Process already dead
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        # Force kill if SIGTERM didn't work
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        process.wait()
+
+
+def _run_training_with_torchrun(trial_id, cfg, config_path, config_name, trial_overrides):
+    """
+    Run training as a subprocess using torchrun for multi-GPU support.
+    Returns the final validation loss.
+    """
+    # Find script path
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    train_script = os.path.join(script_dir, 'train.py')
+    
+    # Get number of GPUs from config
+    n_gpus = cfg.hardware.devices if hasattr(cfg.hardware, 'devices') else 4
+    
+    # Find a free port for this trial
+    master_port = _find_free_port()
+    
+    # Build torchrun command
+    cmd = [
+        'torchrun',
+        f'--nproc_per_node={n_gpus}',
+        f'--master_port={master_port}',
+        '--standalone',
+        train_script,
+        f'--config-path={config_path}',
+        f'--config-name={config_name}',
+    ]
+    
+    # Add all overrides
+    for override in trial_overrides:
+        cmd.append(override)
+    
+    print(f"\nTrial {trial_id}: Running with torchrun on {n_gpus} GPUs...")
+    # Print key hyperparameters being passed
+    param_summary = [o for o in trial_overrides if any(k in o for k in ['learning_rate', 'batch_size', 'base_channels', 'num_steps'])]
+    print(f"  Params: {param_summary}")
+    
+    # Run subprocess with real-time output streaming
+    # Use start_new_session=True to create a new process group for proper cleanup
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Merge stderr into stdout
+            text=True,
+            bufsize=1,  # Line buffered
+            cwd=os.path.dirname(os.path.dirname(script_dir)),  # Run from project root
+            start_new_session=True,  # Create new process group for clean termination
+        )
+        
+        # Collect output while streaming to console
+        output_lines = []
+        for line in process.stdout:
+            print(line, end='')  # Print in real-time
+            output_lines.append(line)
+        
+        # Wait for process to complete
+        return_code = process.wait()
+        stdout = ''.join(output_lines)
+        
+        # Check return code
+        if return_code != 0:
+            print(f"Trial {trial_id} failed with return code {return_code}")
+            return 0.0  # Return 0 PSNR for failed trials (we're maximizing)
+        
+        # Try to find final PSNR in output (from validation metrics)
+        # Look for pattern like "[Validation] Epoch X: PSNR=XX.XX, SSIM=X.XXXX"
+        psnr_matches = re.findall(r'\[Validation\] Epoch \d+: PSNR=([\d.]+)', stdout)
+        if psnr_matches:
+            final_psnr = float(psnr_matches[-1])  # Take the last (best) epoch's PSNR
+            print(f"Trial {trial_id}: Final PSNR = {final_psnr:.2f} dB")
+            return final_psnr
+        
+        # Alternative: look for any PSNR value
+        psnr_matches = re.findall(r'PSNR[=:\s]+([\d.]+)', stdout)
+        if psnr_matches:
+            final_psnr = float(psnr_matches[-1])
+            print(f"Trial {trial_id}: Final PSNR (alt) = {final_psnr:.2f} dB")
+            return final_psnr
+        
+        print(f"Trial {trial_id}: Could not parse PSNR from output")
+        return 0.0  # Return 0 PSNR for unparseable trials
+        
+    except KeyboardInterrupt:
+        print(f"\nTrial {trial_id}: Interrupted by user, killing all GPU processes...")
+        # Kill the entire process group (all torchrun workers)
+        _kill_process_group(process)
+        raise
+    except Exception as e:
+        print(f"Trial {trial_id}: Error running subprocess: {e}")
+        _kill_process_group(process)
+        return 0.0  # Return 0 PSNR for failed trials
 
 
 def objective(trial, base_config_overrides, config_path, config_name):
@@ -29,7 +149,7 @@ def objective(trial, base_config_overrides, config_path, config_name):
     
     # Suggest hyperparameters
     learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_int('batch_size', 1, 3, step=1)  # Limited for laptop constraints
+    batch_size = trial.suggest_int('batch_size', 1, 3, step=1)  # Limited for GPU memory
     base_channels = trial.suggest_categorical('base_channels', [32, 64, 128])
     
     # Channel multipliers as string (Optuna doesn't support lists in categorical)
@@ -38,14 +158,21 @@ def objective(trial, base_config_overrides, config_path, config_name):
     # Convert to list for display and Hydra
     channel_mults = [int(x) for x in channel_mults_str.split(',')]
     
-    num_steps = trial.suggest_int('num_steps', 4, 64)
+    # More diffusion steps = better quality but slower inference
+    # DDIM can work well with 20-100 steps, DDPM needs more (100-1000)
+    num_steps = trial.suggest_int('num_steps', 20, 100)
     patch_size = trial.suggest_categorical('patch_size', [128, 256, 512])
     attn_type = trial.suggest_categorical('attn_type', ['linear', 'channel'])
     scheduler = trial.suggest_categorical('scheduler', ['ddpm', 'ddim'])
     
-    # Optional: suggest loss weights
+    # Loss weights
     l1_weight = trial.suggest_float('l1_weight', 0.5, 1.0)
     gradient_weight = trial.suggest_float('gradient_weight', 0.01, 0.1)
+    
+    # Hybrid x0 loss: ALWAYS enabled for sharp denoising (reduces blur)
+    # Combines noise prediction stability with x0 reconstruction + SSIM
+    use_hybrid_x0_loss = True  # Fixed to True - this is the key fix for blur
+    ssim_weight = trial.suggest_float('ssim_weight', 0.2, 0.5)  # Search SSIM weight
     
     # Build Hydra config overrides for this trial
     trial_overrides = base_config_overrides.copy()
@@ -62,17 +189,30 @@ def objective(trial, base_config_overrides, config_path, config_name):
         f'data.patch_size={patch_size}',
         f'training.l1_weight={l1_weight}',
         f'training.gradient_weight={gradient_weight}',
+        f'training.use_hybrid_x0_loss={use_hybrid_x0_loss}',
+        f'training.ssim_weight={ssim_weight}',
     ])
     
-    # Unique save path for this trial
+    # Unique save path for this trial - use ABSOLUTE paths to avoid Hydra CWD issues
     trial_id = trial.number
-    trial_overrides.append(f'paths.save_dir=./checkpoints/optuna_trial_{trial_id}')
-    trial_overrides.append(f'paths.log_dir=./logs/optuna_trial_{trial_id}')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(script_dir))
+    trial_overrides.append(f'paths.save_dir={project_root}/checkpoints/optuna_trial_{trial_id}')
+    trial_overrides.append(f'paths.log_dir={project_root}/logs/optuna_trial_{trial_id}')
+    
+    # Hardware configuration - use all availabl e GPUs
+    trial_overrides.extend([
+        'hardware.accelerator=gpu',
+        'hardware.devices=4',  # Multi-GPU training per trial
+    ])
+    
+    # Prevent Hydra from changing working directory (keeps paths consistent)
+    trial_overrides.append(f'hydra.run.dir={project_root}')
     
     # Reduce epochs for faster sweeps (can be overridden via base_overrides)
     has_epochs_override = any('training.epochs=' in override for override in trial_overrides)
     if not has_epochs_override:
-        trial_overrides.append('training.epochs=20')  # Default for sweeps
+        trial_overrides.append('training.epochs=300')  # Default for sweeps
     
     print(f"\nTrial {trial_id}: lr={learning_rate:.6f}, bs={batch_size}, "
           f"ch={base_channels}, mults={channel_mults}, steps={num_steps}, "
@@ -81,20 +221,22 @@ def objective(trial, base_config_overrides, config_path, config_name):
     # Clear any existing Hydra instance
     GlobalHydra.instance().clear()
     
-    # Initialize Hydra with config directory
+    # Initialize Hydra with config directory to get base config
     with initialize_config_dir(config_dir=config_path, version_base=None):
-        # Compose config with overrides
+        # Compose config with overrides (for _run_training_with_torchrun to read)
         cfg = compose(config_name=config_name, overrides=trial_overrides)
         
         try:
-            # Run training and capture final loss
-            final_loss = train_with_config(cfg)
-            return final_loss if final_loss is not None and final_loss != float('inf') else float('inf')
+            # Run training via torchrun subprocess for multi-GPU support
+            final_psnr = _run_training_with_torchrun(
+                trial_id, cfg, config_path, config_name, trial_overrides
+            )
+            return final_psnr if final_psnr is not None and final_psnr > 0 else 0.0
         except Exception as e:
             print(f"Trial {trial_id} failed: {e}")
             import traceback
             traceback.print_exc()
-            return float('inf')
+            return 0.0  # Return 0 PSNR for failed trials
         finally:
             # Clean up Hydra instance
             GlobalHydra.instance().clear()
@@ -175,16 +317,27 @@ def main():
         os.makedirs(db_folder, exist_ok=True)
         storage = f"sqlite:///{db_folder}/{args.study_name}.db"
     
+    # Check if database file exists
+    db_path = storage.replace('sqlite:///', '')
+    if os.path.exists(db_path):
+        print(f"Database file exists at {db_path}, attempting to load existing study...")
+    
     try:
         study = optuna.create_study(
             study_name=args.study_name,
             storage=storage,
-            direction='minimize',
+            direction='maximize',  # Maximize PSNR
             pruner=optuna.pruners.MedianPruner() if args.pruning else None,
         )
+        print(f"Created new study: {args.study_name}")
     except optuna.exceptions.DuplicatedStudyError:
         study = optuna.load_study(study_name=args.study_name, storage=storage)
-        print(f"Loaded existing study: {args.study_name}")
+        completed_trials = len([t for t in study.trials if t.state == TrialState.COMPLETE])
+        best_trial = study.best_trial if completed_trials > 0 else None
+        print(f"✓ Loaded existing study: {args.study_name}")
+        print(f"  Current number of trials: {len(study.trials)}")
+        if best_trial:
+            print(f"  Best trial so far: {best_trial.number} with PSNR: {best_trial.value:.2f} dB")
     
     print(f"\nStarting optimization: {args.n_trials} trials")
     print(f"Study: {args.study_name}")
@@ -204,9 +357,9 @@ def main():
     
     # Print results
     print(f"\n{'='*60}")
-    print(f"Best trial:")
+    print(f"Best trial (maximizing PSNR):")
     trial = study.best_trial
-    print(f"  Value: {trial.value:.6f}")
+    print(f"  PSNR: {trial.value:.2f} dB")
     print(f"  Params:")
     for key, value in trial.params.items():
         print(f"    {key}: {value}")
@@ -220,7 +373,8 @@ def main():
     best_params_path = os.path.join(save_path, f'{args.study_name}_best_params.json')
     with open(best_params_path, 'w') as f:
         json.dump({
-            'best_value': trial.value,
+            'best_psnr_db': trial.value,
+            'objective': 'maximize_psnr',
             'best_params': trial.params,
             'study_name': args.study_name,
             'storage': storage,
@@ -231,7 +385,6 @@ def main():
     print(f"\nBest parameters saved to: {best_params_path}")
     
     # Database is the primary storage - all results are in SQLite
-    db_path = storage.replace('sqlite:///', '')
     print(f"\n{'='*60}")
     print(f"Optuna SQLite Database (PRIMARY STORAGE):")
     print(f"  Location: {db_path}")
@@ -265,4 +418,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

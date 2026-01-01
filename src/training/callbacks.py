@@ -54,6 +54,10 @@ class ImageLoggingCallback(Callback):
         pl_module: pl.LightningModule
     ):
         """Log images at end of validation epoch."""
+        # Only log/save on rank 0 to avoid conflicts in multi-GPU training
+        if trainer.global_rank != 0:
+            return
+            
         if trainer.current_epoch % self.log_every_n_epochs != 0:
             return
         
@@ -151,6 +155,10 @@ class ImageLoggingCallback(Callback):
         pl_module: pl.LightningModule
     ):
         """Log training images at end of training epoch."""
+        # Only log/save on rank 0 to avoid conflicts in multi-GPU training
+        if trainer.global_rank != 0:
+            return
+            
         if not self.log_training_images:
             return
 
@@ -232,8 +240,8 @@ class ImageLoggingCallback(Callback):
             noisy_rgb = to_rgb(img_noisy.clamp(0, 1))
             denoised_rgb = to_rgb(denoised.clamp(0, 1))
 
-            # Compute metrics if requested
-            if self.compute_metrics and trainer.logger is not None:
+            # Compute metrics if requested (only on rank 0 to avoid duplicates)
+            if self.compute_metrics and trainer.logger is not None and trainer.global_rank == 0:
                 try:
                     from training.metrics import DenoisingMetrics
                     metrics_calc = DenoisingMetrics(data_range=1.0)
@@ -247,13 +255,17 @@ class ImageLoggingCallback(Callback):
                     logger.add_scalar(f'{prefix}/SNR_Denoised', metrics['snr_denoised'], trainer.current_epoch)
                     logger.add_scalar(f'{prefix}/SNR_Improvement', metrics['snr_improvement'], trainer.current_epoch)
 
-                    print(f"{prefix} Epoch {trainer.current_epoch}: PSNR={metrics['psnr']:.2f}, SSIM={metrics['ssim']:.4f}")
+                    # Use Lightning's log method - rank_zero_only since we only compute on rank 0
+                    # (sync_dist would deadlock since other ranks don't reach this code path)
+                    pl_module.log(f'{prefix.lower()}/psnr', metrics['psnr'], rank_zero_only=True)
+                    pl_module.log(f'{prefix.lower()}/ssim', metrics['ssim'], rank_zero_only=True)
+                    print(f"[{prefix}] Epoch {trainer.current_epoch}: PSNR={metrics['psnr']:.2f}, SSIM={metrics['ssim']:.4f}")
 
                 except Exception as e:
                     print(f"Warning: Failed to compute {prefix.lower()} metrics: {e}")
 
-            # Log to TensorBoard
-            if trainer.logger is not None:
+            # Log to TensorBoard (only on rank 0)
+            if trainer.logger is not None and trainer.global_rank == 0:
                 logger = trainer.logger.experiment
 
                 # Concatenate horizontally: [clean | noisy | denoised]
@@ -367,6 +379,10 @@ class ValidationMetricsCallback(Callback):
         pl_module: pl.LightningModule
     ):
         """Run evaluation at specified intervals."""
+        # Only run on rank 0 to avoid duplicate outputs
+        if trainer.global_rank != 0:
+            return
+            
         if trainer.current_epoch % self.eval_every_n_epochs != 0:
             return
         

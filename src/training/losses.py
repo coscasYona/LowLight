@@ -669,6 +669,339 @@ class EnhancedHybridLoss(nn.Module):
         return total_loss
 
 
+class SSIMLoss(nn.Module):
+    """
+    Optimized Structural Similarity Index (SSIM) based loss.
+    
+    SSIM preserves structural information better than L1/MSE, helping
+    to maintain sharpness and avoid blur in denoising tasks.
+    
+    Optimizations:
+    - Uses registered buffers to avoid CPU-GPU transfers
+    - Pre-creates windows for common channel counts (1, 3, 4)
+    - Uses smaller window size (7) for speed with minimal quality loss
+    
+    Args:
+        window_size: Size of Gaussian window (default: 7, smaller = faster)
+        size_average: Whether to average over batch (default: True)
+    """
+    
+    def __init__(self, window_size: int = 7, size_average: bool = True):
+        super().__init__()
+        self.window_size = window_size
+        self.size_average = size_average
+        
+        # Pre-create windows for common channel counts as buffers (avoids CPU-GPU transfer)
+        for ch in [1, 3, 4]:
+            window = self._create_window(window_size, ch)
+            self.register_buffer(f'window_{ch}', window, persistent=False)
+    
+    def _create_window(self, window_size: int, channel: int) -> torch.Tensor:
+        """Create Gaussian window for SSIM computation."""
+        sigma = 1.5
+        coords = torch.arange(window_size).float() - window_size // 2
+        gauss = torch.exp(-coords.pow(2) / (2 * sigma ** 2))
+        gauss = gauss / gauss.sum()
+        
+        # 2D Gaussian window via outer product
+        window = gauss.outer(gauss)
+        window = window.unsqueeze(0).unsqueeze(0)
+        window = window.expand(channel, 1, window_size, window_size).contiguous()
+        
+        return window
+    
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Compute SSIM loss (1 - SSIM).
+        
+        Args:
+            pred: Predicted tensor [B, C, H, W]
+            target: Target tensor [B, C, H, W]
+            
+        Returns:
+            SSIM loss (1 - SSIM, so lower is better)
+        """
+        channel = pred.size(1)
+        
+        # Get pre-created window or create new one
+        window_attr = f'window_{channel}'
+        if hasattr(self, window_attr):
+            window = getattr(self, window_attr)
+        else:
+            # Fallback for unusual channel counts
+            window = self._create_window(self.window_size, channel).to(pred.device)
+        
+        # SSIM constants
+        C1 = 0.01 ** 2
+        C2 = 0.03 ** 2
+        padding = self.window_size // 2
+        
+        # Compute means
+        mu1 = F.conv2d(pred, window, padding=padding, groups=channel)
+        mu2 = F.conv2d(target, window, padding=padding, groups=channel)
+        
+        mu1_sq = mu1.pow(2)
+        mu2_sq = mu2.pow(2)
+        mu1_mu2 = mu1 * mu2
+        
+        # Compute variances and covariance
+        sigma1_sq = F.conv2d(pred * pred, window, padding=padding, groups=channel) - mu1_sq
+        sigma2_sq = F.conv2d(target * target, window, padding=padding, groups=channel) - mu2_sq
+        sigma12 = F.conv2d(pred * target, window, padding=padding, groups=channel) - mu1_mu2
+        
+        # SSIM formula
+        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+                   ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+        
+        return 1.0 - ssim_map.mean()
+
+
+class X0PredictionLoss(nn.Module):
+    """
+    Loss for x0-prediction (direct clean image prediction) mode.
+    
+    Instead of predicting noise, the model directly predicts the clean image.
+    This often works better for restoration tasks like denoising because:
+    1. The model directly optimizes for image quality
+    2. Perceptual and structural losses can be applied directly
+    3. Avoids noise prediction instabilities at low timesteps
+    
+    Combines L1, SSIM, and optional frequency losses on the predicted clean image.
+    
+    Args:
+        l1_weight: Weight for L1 loss (default: 0.5)
+        ssim_weight: Weight for SSIM loss (default: 0.3)
+        frequency_weight: Weight for frequency loss (default: 0.1)
+        gradient_weight: Weight for gradient loss (default: 0.1)
+        loss_scale: Scaling factor (default: 1.0)
+    """
+    
+    def __init__(
+        self,
+        l1_weight: float = 0.5,
+        ssim_weight: float = 0.3,
+        frequency_weight: float = 0.1,
+        gradient_weight: float = 0.1,
+        loss_scale: float = 1.0,
+    ):
+        super().__init__()
+        self.l1_weight = l1_weight
+        self.ssim_weight = ssim_weight
+        self.frequency_weight = frequency_weight
+        self.gradient_weight = gradient_weight
+        self.loss_scale = loss_scale
+        
+        self.l1_loss = nn.L1Loss()
+        self.ssim_loss = SSIMLoss()
+        self.frequency_loss = FrequencyDomainLoss()
+        self.gradient_loss = MultiScaleGradientLoss()
+    
+    def forward(
+        self,
+        pred_x0: torch.Tensor,
+        target_x0: torch.Tensor,
+        return_components: bool = False,
+    ) -> torch.Tensor:
+        """
+        Compute x0-prediction loss.
+        
+        Args:
+            pred_x0: Predicted clean image [B, C, H, W]
+            target_x0: Target clean image [B, C, H, W]
+            return_components: If True, return dict with individual loss components
+            
+        Returns:
+            Total loss
+        """
+        # Ensure high precision
+        pred_x0 = pred_x0.float()
+        target_x0 = target_x0.float()
+        
+        # Clean NaN/inf values
+        pred_x0 = torch.where(torch.isfinite(pred_x0), pred_x0, torch.zeros_like(pred_x0))
+        target_x0 = torch.where(torch.isfinite(target_x0), target_x0, torch.zeros_like(target_x0))
+        
+        # Clamp to valid image range
+        pred_x0 = torch.clamp(pred_x0, 0.0, 1.0)
+        target_x0 = torch.clamp(target_x0, 0.0, 1.0)
+        
+        # Compute individual losses
+        loss_l1 = self.l1_loss(pred_x0, target_x0)
+        loss_ssim = self.ssim_loss(pred_x0, target_x0)
+        
+        loss_freq = torch.tensor(0.0, device=pred_x0.device)
+        loss_grad = torch.tensor(0.0, device=pred_x0.device)
+        
+        if self.frequency_weight > 0:
+            loss_freq = self.frequency_loss(pred_x0, target_x0)
+        
+        if self.gradient_weight > 0:
+            loss_grad = self.gradient_loss(pred_x0, target_x0)
+        
+        # Weighted combination
+        total_loss = (
+            self.l1_weight * loss_l1 +
+            self.ssim_weight * loss_ssim +
+            self.frequency_weight * loss_freq +
+            self.gradient_weight * loss_grad
+        )
+        
+        total_loss = total_loss * self.loss_scale
+        
+        if return_components:
+            return total_loss, {
+                'l1': loss_l1.item(),
+                'ssim': loss_ssim.item(),
+                'frequency': loss_freq.item() if self.frequency_weight > 0 else 0.0,
+                'gradient': loss_grad.item() if self.gradient_weight > 0 else 0.0,
+                'total_unscaled': total_loss.item() / self.loss_scale,
+            }
+        
+        return total_loss
+
+
+class HybridX0NoiseLoss(nn.Module):
+    """
+    Optimized hybrid loss combining noise prediction with x0 reconstruction.
+    
+    This combines the stability of noise prediction with the quality benefits
+    of x0 reconstruction losses, similar to SVNR and other SOTA methods.
+    
+    Optimizations over naive implementation:
+    - Single L1 loss instance shared between components
+    - Removed redundant gradient losses (only on noise, not x0)
+    - Disabled expensive frequency loss
+    - Uses optimized SSIMLoss with pre-registered buffers
+    
+    Args:
+        noise_weight: Weight for noise prediction loss (default: 0.6)
+        x0_weight: Weight for x0 reconstruction loss (default: 0.4)
+        l1_weight: L1 weight in noise loss (default: 0.8)
+        ssim_weight: SSIM weight in x0 loss (default: 0.3)
+        gradient_weight: Gradient weight for noise only (default: 0.05)
+        loss_scale: Scaling factor (default: 10.0)
+    """
+    
+    def __init__(
+        self,
+        noise_weight: float = 0.6,
+        x0_weight: float = 0.4,
+        l1_weight: float = 0.8,
+        ssim_weight: float = 0.3,
+        gradient_weight: float = 0.05,
+        loss_scale: float = 10.0,
+    ):
+        super().__init__()
+        self.noise_weight = noise_weight
+        self.x0_weight = x0_weight
+        self.l1_weight = l1_weight
+        self.ssim_weight = ssim_weight
+        self.gradient_weight = gradient_weight
+        self.loss_scale = loss_scale
+        
+        # Shared loss functions (efficient)
+        self.l1_loss = nn.L1Loss()
+        self.mse_loss = nn.MSELoss()
+        self.ssim_loss = SSIMLoss(window_size=7)  # Smaller window = faster
+        
+        # Gradient loss only for noise (skip for x0 - too expensive)
+        if gradient_weight > 0:
+            # Pre-create Sobel kernels as buffers
+            sobel_x = torch.tensor(
+                [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], 
+                dtype=torch.float32
+            ).view(1, 1, 3, 3)
+            sobel_y = torch.tensor(
+                [[-1, -2, -1], [0, 0, 0], [1, 2, 1]], 
+                dtype=torch.float32
+            ).view(1, 1, 3, 3)
+            self.register_buffer('sobel_x', sobel_x, persistent=False)
+            self.register_buffer('sobel_y', sobel_y, persistent=False)
+    
+    def _gradient_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Efficient gradient loss using pre-registered Sobel kernels."""
+        n_channels = pred.size(1)
+        
+        kernel_x = self.sobel_x.repeat(n_channels, 1, 1, 1)
+        kernel_y = self.sobel_y.repeat(n_channels, 1, 1, 1)
+        
+        pred_gx = F.conv2d(pred, kernel_x, groups=n_channels, padding=1)
+        pred_gy = F.conv2d(pred, kernel_y, groups=n_channels, padding=1)
+        
+        with torch.no_grad():
+            target_gx = F.conv2d(target, kernel_x, groups=n_channels, padding=1)
+            target_gy = F.conv2d(target, kernel_y, groups=n_channels, padding=1)
+        
+        return (F.l1_loss(pred_gx, target_gx) + F.l1_loss(pred_gy, target_gy)) * 0.5
+    
+    def forward(
+        self,
+        pred_noise: torch.Tensor,
+        actual_noise: torch.Tensor,
+        x_t: torch.Tensor,
+        x_0: torch.Tensor,
+        sqrt_alpha: torch.Tensor,
+        sqrt_one_minus_alpha: torch.Tensor,
+        return_components: bool = False,
+    ) -> torch.Tensor:
+        """
+        Compute optimized hybrid noise + x0 loss.
+        
+        Args:
+            pred_noise: Predicted noise [B, C, H, W]
+            actual_noise: Target noise [B, C, H, W]
+            x_t: Noisy input [B, C, H, W]
+            x_0: Clean target [B, C, H, W]
+            sqrt_alpha: sqrt(alpha_bar) for timesteps [B, 1, 1, 1]
+            sqrt_one_minus_alpha: sqrt(1 - alpha_bar) for timesteps [B, 1, 1, 1]
+            return_components: If True, return loss components dict
+            
+        Returns:
+            Total loss
+        """
+        # === NOISE PREDICTION LOSS (efficient: L1 + optional gradient) ===
+        loss_noise_l1 = self.l1_loss(pred_noise, actual_noise)
+        loss_noise_mse = self.mse_loss(pred_noise, actual_noise)
+        
+        # Combine L1 and MSE for noise
+        loss_noise = self.l1_weight * loss_noise_l1 + (1 - self.l1_weight) * loss_noise_mse
+        
+        # Add gradient loss on noise if enabled
+        if self.gradient_weight > 0:
+            loss_noise = loss_noise + self.gradient_weight * self._gradient_loss(pred_noise, actual_noise)
+        
+        # === X0 RECONSTRUCTION LOSS (efficient: L1 + SSIM only) ===
+        # Reconstruct x0 from prediction
+        sqrt_alpha_safe = torch.clamp(sqrt_alpha, min=1e-6)
+        pred_x0 = (x_t - sqrt_one_minus_alpha * pred_noise) / sqrt_alpha_safe
+        pred_x0 = torch.clamp(pred_x0, 0.0, 1.0)
+        
+        # L1 on x0
+        loss_x0_l1 = self.l1_loss(pred_x0, x_0)
+        
+        # SSIM on x0 (for sharpness - this is the key benefit)
+        loss_x0_ssim = self.ssim_loss(pred_x0, x_0)
+        
+        # Combine x0 losses
+        loss_x0 = (1 - self.ssim_weight) * loss_x0_l1 + self.ssim_weight * loss_x0_ssim
+        
+        # === COMBINE ===
+        total_loss = self.noise_weight * loss_noise + self.x0_weight * loss_x0
+        total_loss = total_loss * self.loss_scale
+        
+        if return_components:
+            return total_loss, {
+                'noise_l1': loss_noise_l1.item(),
+                'noise_total': loss_noise.item(),
+                'x0_l1': loss_x0_l1.item(),
+                'x0_ssim': loss_x0_ssim.item(),
+                'x0_total': loss_x0.item(),
+                'total_unscaled': total_loss.item() / self.loss_scale,
+            }
+        
+        return total_loss
+
+
 __all__ = [
     "HybridDiffusionLoss", 
     "MinSNRWeightedLoss", 
@@ -677,5 +1010,8 @@ __all__ = [
     "FrequencyDomainLoss",
     "MultiScaleGradientLoss",
     "EnhancedHybridLoss",
+    "SSIMLoss",
+    "X0PredictionLoss",
+    "HybridX0NoiseLoss",
 ]
 

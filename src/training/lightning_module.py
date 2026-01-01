@@ -16,7 +16,7 @@ from omegaconf import DictConfig
 
 from models import EMVA1288Diffusion
 from models.noise_model import sample_params_max
-from training.losses import HybridDiffusionLoss, EnhancedHybridLoss
+from training.losses import HybridDiffusionLoss, EnhancedHybridLoss, HybridX0NoiseLoss
 from training.metrics import DenoisingMetrics
 
 
@@ -63,9 +63,11 @@ class EMVA1288LightningModule(pl.LightningModule):
         ema_decay: float = 0.9999,
         # Enhanced loss options
         use_enhanced_loss: bool = False,
+        use_hybrid_x0_loss: bool = False,  # NEW: Adds SSIM + x0 reconstruction for sharpness
         mse_weight: float = 0.25,
         charbonnier_weight: float = 0.25,
         frequency_weight: float = 0.1,
+        ssim_weight: float = 0.3,  # NEW: SSIM weight for x0 loss
     ):
         super().__init__()
         
@@ -97,9 +99,11 @@ class EMVA1288LightningModule(pl.LightningModule):
             use_ema = getattr(training_config, 'use_ema', use_ema)
             ema_decay = getattr(training_config, 'ema_decay', ema_decay)
             use_enhanced_loss = getattr(training_config, 'use_enhanced_loss', use_enhanced_loss)
+            use_hybrid_x0_loss = getattr(training_config, 'use_hybrid_x0_loss', use_hybrid_x0_loss)
             mse_weight = getattr(training_config, 'mse_weight', mse_weight)
             charbonnier_weight = getattr(training_config, 'charbonnier_weight', charbonnier_weight)
             frequency_weight = getattr(training_config, 'frequency_weight', frequency_weight)
+            ssim_weight = getattr(training_config, 'ssim_weight', ssim_weight)
         
         # Store config
         self.learning_rate = learning_rate
@@ -137,8 +141,31 @@ class EMVA1288LightningModule(pl.LightningModule):
             edge_detector=edge_detector,
         )
         
-        # Loss function (enhanced or standard)
-        if use_enhanced_loss:
+        # NOTE: torch.compile is disabled because physics_encoder creates tensors
+        # from Python floats (camera_params dict), which breaks CUDA graphs.
+        # To enable: fix physics_encoder.py to avoid torch.tensor() from Python values
+        # try:
+        #     if torch.cuda.is_available() and hasattr(torch, 'compile'):
+        #         self.model = torch.compile(self.model, mode="reduce-overhead")
+        #         print("torch.compile enabled for faster training")
+        # except Exception as e:
+        #     print(f"torch.compile not available or failed: {e}")
+        
+        # Loss function selection (in priority order)
+        self.use_hybrid_x0_loss = use_hybrid_x0_loss
+        
+        if use_hybrid_x0_loss:
+            # NEW: Hybrid loss with x0 reconstruction + SSIM for better sharpness
+            # This combines noise prediction stability with x0 reconstruction quality
+            self.loss_fn = HybridX0NoiseLoss(
+                noise_weight=0.5,
+                x0_weight=0.5,
+                l1_weight=l1_weight,
+                ssim_weight=ssim_weight,
+                gradient_weight=gradient_weight,
+                loss_scale=loss_scale,
+            )
+        elif use_enhanced_loss:
             self.loss_fn = EnhancedHybridLoss(
                 mse_weight=mse_weight,
                 l1_weight=l1_weight,
@@ -204,9 +231,11 @@ class EMVA1288LightningModule(pl.LightningModule):
         """
         Training step with simple Gaussian diffusion (matching legacy implementation).
         
-        Note: Legacy code used simple Gaussian for training (more stable convergence)
-        while physics noise is used for validation. This asymmetry worked well
-        because the model learns the noise structure from the conditioning (ISO/ratio).
+        IMPORTANT: Legacy code used simple Gaussian for training (more stable convergence)
+        while physics noise is used for validation. This asymmetry works well because:
+        1. Gaussian noise provides stable, predictable gradients
+        2. The model learns physics-aware denoising through CONDITIONING (ISO/ratio)
+        3. Physics noise in validation tests generalization to real noise
         
         Args:
             batch: Dict with 'clean', 'noisy', 'ratio', 'ISO'
@@ -227,7 +256,7 @@ class EMVA1288LightningModule(pl.LightningModule):
             device=self.device, dtype=torch.long
         )
         
-        # Generate base noise
+        # Generate base Gaussian noise (used directly for training - matches legacy!)
         base_noise = torch.randn_like(img_gt)
         
         # Get camera parameters for conditioning (uses first sample's ISO/ratio like legacy)
@@ -250,14 +279,16 @@ class EMVA1288LightningModule(pl.LightningModule):
         if self.use_edge_cond:
             edge_feat = self.model.compute_edge_features(img_gt)
         
-        # Use physics-based noise for training to match validation
-        # This ensures the model learns the correct noise distribution
-        noisy_state = self.model.q_sample(
-            img_gt, base_noise, timesteps,
-            iso=iso, ratio=ratio,
-            camera_params=camera_params,
-            use_physics_noise=True,
-        )
+        # CRITICAL FIX: Use simple Gaussian diffusion for training (matches legacy!)
+        # Physics noise is complex (shot + row + quantization) and makes training unstable
+        # The model learns physics through CONDITIONING (ISO/ratio/camera_params), not noise
+        sqrt_alpha = self.model._extract(
+            self.model.sqrt_alphas_cumprod, timesteps, img_gt.shape
+        ).float()
+        sqrt_one_minus_alpha = self.model._extract(
+            self.model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
+        ).float()
+        noisy_state = sqrt_alpha * img_gt + sqrt_one_minus_alpha * base_noise
 
         # Predict noise (with measurement and edge conditioning if enabled)
         pred_noise = self.model(
@@ -271,28 +302,11 @@ class EMVA1288LightningModule(pl.LightningModule):
             edge_feat=edge_feat,
         )
 
-        # Compute actual noise using the same formula as validation
-        # Even with physics noise, we compute the theoretical noise for loss computation
-        # Ensure high precision for noise computation to avoid gradient issues
-        sqrt_alpha = self.model._extract(
-            self.model.sqrt_alphas_cumprod, timesteps, img_gt.shape
-        ).float()  # Ensure float32
-        sqrt_one_minus_alpha = self.model._extract(
-            self.model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
-        ).float()  # Ensure float32
-        sqrt_one_minus_alpha_safe = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
+        # Target is the base Gaussian noise we added (simple and stable!)
+        # This matches the legacy implementation exactly
+        actual_noise = base_noise.detach()
 
-        # Compute noise in high precision
-        # NOTE: actual_noise is the target, so it doesn't need gradients
-        # Detaching ensures clean gradient flow through pred_noise only
-        actual_noise = (noisy_state.float() - sqrt_alpha * img_gt.float()) / sqrt_one_minus_alpha_safe
-        actual_noise = torch.where(
-            torch.isfinite(actual_noise), actual_noise, torch.zeros_like(actual_noise)
-        )
-        actual_noise = actual_noise.detach()  # Detach target to ensure clean gradient flow
-        actual_noise = torch.clamp(actual_noise, min=-10.0, max=10.0)
-
-        # Ensure predicted noise is also in high precision
+        # Ensure predicted noise is in high precision
         # CRITICAL: pred_noise MUST keep gradients for backprop
         pred_noise = pred_noise.float()
         pred_noise = torch.where(
@@ -300,22 +314,18 @@ class EMVA1288LightningModule(pl.LightningModule):
         )
 
         # Compute loss with high precision tensors
-        loss = self.loss_fn(pred_noise, actual_noise)
-        
-        # DEBUG: Verify gradients will flow (only on first batch of first epoch)
-        if batch_idx == 0 and self.current_epoch == 0:
-            print(f"\n=== GRADIENT DEBUG INFO ===")
-            print(f"loss.requires_grad = {loss.requires_grad}")
-            print(f"pred_noise.requires_grad = {pred_noise.requires_grad}")
-            print(f"actual_noise.requires_grad = {actual_noise.requires_grad}")
-            print(f"loss.item() = {loss.item():.6f}")
-            print(f"pred_noise.mean() = {pred_noise.mean().item():.6f}")
-            print(f"actual_noise.mean() = {actual_noise.mean().item():.6f}")
-            
-            # Check if model parameters require grad
-            param_requires_grad = any(p.requires_grad for p in self.model.parameters())
-            print(f"model parameters require_grad = {param_requires_grad}")
-            print("=" * 30 + "\n")
+        if self.use_hybrid_x0_loss:
+            # Hybrid x0+noise loss: includes x0 reconstruction with SSIM for sharpness
+            loss = self.loss_fn(
+                pred_noise=pred_noise,
+                actual_noise=actual_noise,
+                x_t=noisy_state,
+                x_0=img_gt,
+                sqrt_alpha=sqrt_alpha,
+                sqrt_one_minus_alpha=sqrt_one_minus_alpha,
+            )
+        else:
+            loss = self.loss_fn(pred_noise, actual_noise)
         
         # Check for NaN loss
         if not torch.isfinite(loss):
@@ -327,8 +337,12 @@ class EMVA1288LightningModule(pl.LightningModule):
             self._update_ema()
         
         # Log metrics (both step-level and epoch-level for TensorBoard visibility)
-        self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log('train/loss_unscaled', loss / self.loss_fn.loss_scale, on_step=True, on_epoch=True)
+        self.log('train/loss', loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        self.log('train/loss_unscaled', loss / self.loss_fn.loss_scale, on_step=True, on_epoch=True, sync_dist=True)
+        
+        # Print training progress periodically (for subprocess visibility)
+        if self.global_rank == 0 and self.global_step % 10 == 0:
+            print(f"[Train] Epoch {self.current_epoch}, Step {self.global_step}, Loss: {loss.item():.4f}")
 
         # Store last batch for training image logging (only in training mode)
         if self.training and batch_idx == 0:  # Store first batch of each epoch
@@ -556,46 +570,21 @@ class EMVA1288LightningModule(pl.LightningModule):
         if self.ema_model is not None and 'ema_state_dict' in checkpoint:
             self.ema_model.load_state_dict(checkpoint['ema_state_dict'])
     
-    def on_train_start(self):
-        """Verify model is in training mode and parameters require gradients."""
-        print("\n=== TRAINING STARTUP CHECK ===")
-        print(f"Model training mode: {self.training}")
-        print(f"Model requires_grad: {any(p.requires_grad for p in self.model.parameters())}")
-        
-        # Check first parameter as example
-        first_param = next(self.model.parameters())
-        print(f"First param shape: {first_param.shape}, requires_grad: {first_param.requires_grad}")
-        print("=" * 30 + "\n")
-    
     def on_after_backward(self):
-        """Check gradients after backward pass to verify backprop is working."""
+        """Log gradient norm for monitoring."""
         if self.global_step % 100 == 0:
             total_norm = 0.0
             param_count = 0
-            zero_grad_params = []
             
             for name, param in self.model.named_parameters():
                 if param.grad is not None:
                     param_norm = param.grad.data.norm(2)
                     total_norm += param_norm.item() ** 2
                     param_count += 1
-                    
-                    # Check for zero gradients (potential issue)
-                    if param_norm.item() < 1e-8:
-                        zero_grad_params.append(name)
-                else:
-                    if self.global_step < 10:  # Only warn early in training
-                        print(f"WARNING: {name} has no gradient!")
             
             if param_count > 0:
                 total_norm = total_norm ** (1. / 2)
                 self.log('train/grad_norm', total_norm, on_step=True)
-                
-                # Debug output on first few steps
-                if self.global_step < 10:
-                    print(f"Step {self.global_step}: Gradient norm = {total_norm:.6f}")
-                    if zero_grad_params:
-                        print(f"  Zero-gradient params: {zero_grad_params[:5]}...")  # Show first 5
 
 
 __all__ = ["EMVA1288LightningModule"]

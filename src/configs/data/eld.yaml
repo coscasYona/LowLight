@@ -23,6 +23,6 @@ img_ids_set2: [5, 10, 15]
 
 # Data loading
 batch_size: 1
-num_workers: 4
+num_workers: 32
 pin_memory: true
 

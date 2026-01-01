@@ -21,7 +21,13 @@ training:
   
   # Enhanced SOTA loss function (set use_enhanced_loss: true to enable)
   # Combines MSE, L1, Charbonnier, frequency-domain, and multi-scale gradient losses
-  use_enhanced_loss: true   # Set to true for SOTA edge preservation
+  use_enhanced_loss: false   # Set to true for SOTA edge preservation
+  
+  # NEW: Hybrid X0+Noise loss for sharp denoising (recommended!)
+  # Combines noise prediction stability with x0 reconstruction + SSIM for sharpness
+  # Priority: use_hybrid_x0_loss > use_enhanced_loss > standard HybridDiffusionLoss
+  use_hybrid_x0_loss: false  # Set to true for maximum sharpness (reduces blur)
+  ssim_weight: 0.3           # SSIM weight in hybrid x0 loss (preserves structure)
   
   # Loss weights (shared between standard and enhanced loss)
   l1_weight: 0.35           # Weight for L1 loss (0.0-1.0 mix in standard, direct weight in enhanced)
@@ -42,26 +48,28 @@ early_stopping:
   mode: min
 
 # Checkpointing
-# Note: You can monitor "val/psnr" (mode: max) for checkpoint selection based on denoising quality
+# Only saves: 1 best checkpoint (by PSNR) + 1 latest checkpoint (overwritten each validation)
+# This keeps storage minimal (~2.4GB for two 1.2GB checkpoints)
 checkpoint:
-  save_top_k: 3
-  monitor: val/loss  # Alternative: val/psnr with mode: max
-  mode: min
-  save_last: true
-  filename: "epoch_{epoch:04d}_val_loss_{val/loss:.4f}"
+  save_top_k: 1                    # Only keep the single best checkpoint
+  monitor: val/psnr                # Monitor PSNR for best model selection
+  mode: max                        # Maximize PSNR (higher is better)
+  save_last: true                  # Keep a 'last.ckpt' that gets overwritten
+  every_n_epochs: 5                # Only save checkpoints every N epochs (reduces I/O)
+  filename: "best_psnr_{val/psnr:.2f}_epoch_{epoch:04d}"
 
 # Logging
 logging:
-  log_every_n_steps: 100
-  image_log_every_n_epochs: 1
+  log_every_n_steps: 10  # Keep reasonable for small datasets (18 batches/epoch)
+  image_log_every_n_epochs: 5  # Reduced from 1 to lower GPU stalls
   num_sample_images: 4
 
 # Hardware
 hardware:
   accelerator: auto
   devices: auto
-  precision: 32  # Use 16-mixed for faster training with mixed precision
-  num_workers: 4
+  precision: "16-mixed"  # Mixed precision for ~2x speedup (was: 32)
+  num_workers: 8  # Reduced from 32 to avoid CPU overhead
 
 # Paths
 paths:

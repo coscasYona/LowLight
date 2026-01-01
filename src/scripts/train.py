@@ -38,7 +38,8 @@ def create_callbacks(cfg: DictConfig) -> list:
     """Create training callbacks from config."""
     callbacks = []
     
-    # Model checkpoint
+    # Model checkpoint - saves best (by PSNR) and optionally last
+    # every_n_epochs reduces I/O overhead for large checkpoints
     checkpoint_callback = ModelCheckpoint(
         dirpath=os.path.join(cfg.paths.save_dir, 'checkpoints'),
         filename=cfg.checkpoint.filename,
@@ -46,6 +47,7 @@ def create_callbacks(cfg: DictConfig) -> list:
         mode=cfg.checkpoint.mode,
         save_top_k=cfg.checkpoint.save_top_k,
         save_last=cfg.checkpoint.save_last,
+        every_n_epochs=cfg.checkpoint.get('every_n_epochs', 1),
         verbose=True,
     )
     callbacks.append(checkpoint_callback)
@@ -108,7 +110,15 @@ def train_with_config(cfg: DictConfig) -> float:
 
     
     # Set seed for reproducibility
-    pl.seed_everything(cfg.seed, workers=True)
+    seed = int(cfg.get('seed', 42))
+    pl.seed_everything(seed, workers=True)
+    import torch
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        # Set deterministic flags before model creation
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
     
     # Create directories
     os.makedirs(cfg.paths.save_dir, exist_ok=True)
@@ -167,32 +177,41 @@ def train_with_config(cfg: DictConfig) -> float:
     # Create model
     model_config = cfg.model if hasattr(cfg, 'model') else cfg
     
-    # Convert channel_mults to tuple if needed
+    # Convert channel_mults to tuple if needed - ensure consistent type
     channel_mults = model_config.channel_mults
     if isinstance(channel_mults, str):
         channel_mults = tuple(int(x) for x in channel_mults.split(','))
     elif not isinstance(channel_mults, tuple):
         channel_mults = tuple(channel_mults)
     
+    # Ensure all config values are explicit types to avoid Hydra/OmegaConf issues
+    use_ema = bool(cfg.training.get('use_ema', False))
+    ema_decay = float(cfg.training.get('ema_decay', 0.9999))
+    
     model = EMVA1288LightningModule(
-        in_channels=model_config.in_channels,
-        out_channels=model_config.out_channels,
-        base_channels=model_config.base_channels,
+        in_channels=int(model_config.in_channels),
+        out_channels=int(model_config.out_channels),
+        base_channels=int(model_config.base_channels),
         channel_mults=channel_mults,
-        num_steps=model_config.num_steps,
-        time_embed_dim=model_config.time_embed_dim,
-        cond_embed_dim=model_config.cond_embed_dim,
-        attn_type=model_config.attn_type,
-        scheduler=model_config.scheduler,
-        camera_type=model_config.get('camera_type', 'SonyA7S2'),
-        noise_code=model_config.get('noise_code', 'prq'),
-        learning_rate=cfg.training.learning_rate,
-        l1_weight=cfg.training.l1_weight,
-        gradient_weight=cfg.training.gradient_weight,
-        loss_scale=cfg.training.loss_scale,
-        use_ema=cfg.training.use_ema,
-        ema_decay=cfg.training.ema_decay,
+        num_steps=int(model_config.num_steps),
+        time_embed_dim=int(model_config.time_embed_dim),
+        cond_embed_dim=int(model_config.cond_embed_dim),
+        attn_type=str(model_config.attn_type),
+        scheduler=str(model_config.scheduler),
+        camera_type=str(model_config.get('camera_type', 'SonyA7S2')),
+        noise_code=str(model_config.get('noise_code', 'prq')),
+        learning_rate=float(cfg.training.learning_rate),
+        l1_weight=float(cfg.training.l1_weight),
+        gradient_weight=float(cfg.training.gradient_weight),
+        loss_scale=float(cfg.training.loss_scale),
+        use_ema=use_ema,  # Explicitly convert to bool
+        ema_decay=ema_decay,
     )
+    
+    # Log model parameter count
+    param_count = sum(p.numel() for p in model.parameters())
+    trainable_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model parameter count: {param_count} (trainable: {trainable_count})")
     
     # Create callbacks
     callbacks = create_callbacks(cfg)
@@ -205,11 +224,13 @@ def train_with_config(cfg: DictConfig) -> float:
     )
     
     # Create trainer
+    # Trainer configuration
     trainer_kwargs = dict(
         max_epochs=cfg.training.epochs,
         accelerator=cfg.hardware.accelerator,
         devices=cfg.hardware.devices,
         precision=cfg.hardware.precision,
+        strategy='auto',  # Let Lightning choose strategy based on device count
         callbacks=callbacks,
         logger=logger,
         log_every_n_steps=cfg.logging.log_every_n_steps,
@@ -238,6 +259,9 @@ def train_with_config(cfg: DictConfig) -> float:
     try:
         trainer.fit(model, datamodule)
     except Exception as e:
+        print(f"\nERROR during training: {e}")
+        import traceback
+        traceback.print_exc()
         raise
     
     # Get best checkpoint

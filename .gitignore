@@ -79,3 +79,8 @@ checkpoints/*
 outputs/*
 tmp_checkpoints/*
 tmp_logs/*
+src/scripts/checkpoints/*
+src/scripts/multirun/*
+
+# Git credentials (contains sensitive tokens)
+.git-credentials
