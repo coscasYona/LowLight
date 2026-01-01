@@ -7,7 +7,7 @@ base_channels: 64
 channel_mults: [1, 2, 4, 8]
 
 # Diffusion settings
-num_steps: 50  # Increased from 4 - DDIM needs 20-100 steps for quality denoising
+num_steps: 4
 time_embed_dim: 128
 cond_embed_dim: 64
 

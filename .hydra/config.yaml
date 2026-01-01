@@ -1,0 +1,82 @@
+model:
+  in_channels: 4
+  out_channels: 4
+  base_channels: 128
+  channel_mults:
+  - 1
+  - 2
+  - 4
+  - 8
+  num_steps: 81
+  time_embed_dim: 128
+  cond_embed_dim: 64
+  attn_type: linear
+  scheduler: ddpm
+  schedule_type: cosine
+  camera_type: SonyA7S2
+  noise_code: prq
+  use_measurement_cond: true
+  use_edge_cond: false
+  edge_detector: canny
+data:
+  type: sid
+  train_dir: ${oc.env:SID_DATASET_PATH,data/SID/Sony2025/Sony}
+  val_dir: ${oc.env:SID_DATASET_PATH,data/SID/Sony2025/Sony}
+  train_list: dataset/Sony_train.txt
+  val_list: dataset/Sony_val.txt
+  batch_size: 1
+  num_workers: 32
+  pin_memory: true
+  patch_size: 512
+  use_sid_raw: true
+  use_fuji_raw: false
+  val_split: 0.1
+training:
+  epochs: 100
+  batch_size: 1
+  learning_rate: 3.620561116437553e-05
+  use_grad_clip: true
+  grad_clip_max: 1.0
+  use_ema: false
+  ema_decay: 0.9999
+  loss_scale: 10.0
+  use_enhanced_loss: false
+  use_hybrid_x0_loss: false
+  ssim_weight: 0.3
+  l1_weight: 0.778505639450669
+  gradient_weight: 0.12985618697925166
+  mse_weight: 0.25
+  charbonnier_weight: 0.25
+  frequency_weight: 0.1
+early_stopping:
+  enabled: true
+  patience: 50
+  min_delta: 0.0
+  monitor: val/loss
+  mode: min
+checkpoint:
+  save_top_k: 1
+  monitor: val/psnr
+  mode: max
+  save_last: true
+  every_n_epochs: 5
+  filename: best_psnr_{val/psnr:.2f}_epoch_{epoch:04d}
+logging:
+  log_every_n_steps: 10
+  image_log_every_n_epochs: 5
+  num_sample_images: 4
+hardware:
+  accelerator: gpu
+  devices: 4
+  precision: 16-mixed
+  num_workers: 8
+paths:
+  save_dir: /workspace/lowlight/checkpoints/emva1288_optuna/trial_31
+  log_dir: /workspace/lowlight/logs/emva1288_optuna/trial_31
+seed: 42
+trainer:
+  fast_dev_run: null
+  limit_train_batches: null
+  limit_val_batches: null
+  num_sanity_val_steps: null
+  max_steps: null

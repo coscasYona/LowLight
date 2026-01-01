@@ -1,0 +1,17 @@
+- training.epochs=100
+- training.learning_rate=3.620561116437553e-05
+- training.batch_size=1
+- model.base_channels=128
+- model.channel_mults=[1,2,4,8]
+- model.num_steps=81
+- model.attn_type=linear
+- model.scheduler=ddpm
+- data.patch_size=512
+- training.l1_weight=0.778505639450669
+- training.gradient_weight=0.12985618697925166
+- training.use_hybrid_x0_loss=False
+- training.ssim_weight=0.3
+- paths.save_dir=/workspace/lowlight/checkpoints/emva1288_optuna/trial_31
+- paths.log_dir=/workspace/lowlight/logs/emva1288_optuna/trial_31
+- hardware.accelerator=gpu
+- hardware.devices=4
