@@ -161,7 +161,7 @@ def objective(trial, base_config_overrides, config_path, config_name, study_name
     # More diffusion steps = better quality but slower inference
     # DDIM can work well with 20-100 steps, DDPM needs more (100-1000)
     num_steps = trial.suggest_int('num_steps', 20, 100)
-    patch_size = trial.suggest_categorical('patch_size', [128, 256, 512])
+    patch_size = 512  # Fixed patch size for consistency
     attn_type = trial.suggest_categorical('attn_type', ['linear', 'channel'])
     scheduler = trial.suggest_categorical('scheduler', ['ddpm', 'ddim'])
     
@@ -169,10 +169,10 @@ def objective(trial, base_config_overrides, config_path, config_name, study_name
     l1_weight = trial.suggest_float('l1_weight', 0.5, 1.0)
     gradient_weight = trial.suggest_float('gradient_weight', 0.01, 0.1)
     
-    # Hybrid x0 loss: ALWAYS enabled for sharp denoising (reduces blur)
-    # Combines noise prediction stability with x0 reconstruction + SSIM
-    use_hybrid_x0_loss = True  # Fixed to True - this is the key fix for blur
-    ssim_weight = trial.suggest_float('ssim_weight', 0.2, 0.5)  # Search SSIM weight
+    # Hybrid x0 loss: DISABLED - causes training instability
+    # Using standard HybridDiffusionLoss which matches legacy behavior
+    use_hybrid_x0_loss = False
+    ssim_weight = 0.3  # Not used when hybrid loss is disabled
     
     # Build Hydra config overrides for this trial
     trial_overrides = base_config_overrides.copy()
@@ -217,7 +217,7 @@ def objective(trial, base_config_overrides, config_path, config_name, study_name
     
     print(f"\nTrial {trial_id}: lr={learning_rate:.6f}, bs={batch_size}, "
           f"ch={base_channels}, mults={channel_mults}, steps={num_steps}, "
-          f"patch={patch_size}, attn={attn_type}, sched={scheduler}")
+          f"attn={attn_type}, sched={scheduler}")
     
     # Clear any existing Hydra instance
     GlobalHydra.instance().clear()
