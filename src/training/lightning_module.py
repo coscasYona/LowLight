@@ -534,15 +534,12 @@ class EMVA1288LightningModule(pl.LightningModule):
             lr=self.learning_rate
         )
         
-        # LR schedule matching legacy training:
-        # - Epoch 0-9: warmup from 1e-5 to 1e-4 (×0.1 to ×1.0)
-        # - Epoch 10-99: 1e-4 (×1.0)
+        # LR schedule matching legacy training EXACTLY (no warmup):
+        # - Epoch 0-99: 1e-4 (×1.0)
         # - Epoch 100-179: 5e-5 (×0.5)
         # - Epoch 180+: 1e-5 (×0.1)
         def lr_lambda(epoch):
-            if epoch < 10:
-                return 0.1 + 0.9 * (epoch / 9)  # Warmup from 0.1x to 1.0x
-            elif epoch < 100:
+            if epoch < 100:
                 return 1.0  # 1e-4
             elif epoch < 180:
                 return 0.5  # 5e-5
