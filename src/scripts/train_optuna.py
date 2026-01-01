@@ -144,7 +144,7 @@ def _run_training_with_torchrun(trial_id, cfg, config_path, config_name, trial_o
         return 0.0  # Return 0 PSNR for failed trials
 
 
-def objective(trial, base_config_overrides, config_path, config_name):
+def objective(trial, base_config_overrides, config_path, config_name, study_name):
     """Optuna objective function - wraps training with suggested hyperparameters."""
     
     # Suggest hyperparameters
@@ -193,12 +193,13 @@ def objective(trial, base_config_overrides, config_path, config_name):
         f'training.ssim_weight={ssim_weight}',
     ])
     
-    # Unique save path for this trial - use ABSOLUTE paths to avoid Hydra CWD issues
+    # Unique save path for this trial - organized by study name
+    # Structure: checkpoints/{study_name}/trial_{trial_id}/
     trial_id = trial.number
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(os.path.dirname(script_dir))
-    trial_overrides.append(f'paths.save_dir={project_root}/checkpoints/optuna_trial_{trial_id}')
-    trial_overrides.append(f'paths.log_dir={project_root}/logs/optuna_trial_{trial_id}')
+    trial_overrides.append(f'paths.save_dir={project_root}/checkpoints/{study_name}/trial_{trial_id}')
+    trial_overrides.append(f'paths.log_dir={project_root}/logs/{study_name}/trial_{trial_id}')
     
     # Hardware configuration - use all availabl e GPUs
     trial_overrides.extend([
@@ -350,7 +351,7 @@ def main():
     
     # Run optimization
     study.optimize(
-        lambda trial: objective(trial, base_overrides, config_path, args.config_name),
+        lambda trial: objective(trial, base_overrides, config_path, args.config_name, args.study_name),
         n_trials=args.n_trials,
         show_progress_bar=True,
     )
