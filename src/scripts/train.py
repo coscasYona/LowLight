@@ -200,12 +200,19 @@ def train_with_config(cfg: DictConfig) -> float:
         scheduler=str(model_config.scheduler),
         camera_type=str(model_config.get('camera_type', 'SonyA7S2')),
         noise_code=str(model_config.get('noise_code', 'prq')),
+        use_measurement_cond=bool(model_config.get('use_measurement_cond', False)),
+        use_edge_cond=bool(model_config.get('use_edge_cond', False)),
+        edge_detector=str(model_config.get('edge_detector', 'canny')),
         learning_rate=float(cfg.training.learning_rate),
         l1_weight=float(cfg.training.l1_weight),
         gradient_weight=float(cfg.training.gradient_weight),
         loss_scale=float(cfg.training.loss_scale),
-        use_ema=use_ema,  # Explicitly convert to bool
+        use_ema=use_ema,
         ema_decay=ema_decay,
+        use_enhanced_loss=bool(cfg.training.get('use_enhanced_loss', False)),
+        mse_weight=float(cfg.training.get('mse_weight', 0.25)),
+        charbonnier_weight=float(cfg.training.get('charbonnier_weight', 0.25)),
+        frequency_weight=float(cfg.training.get('frequency_weight', 0.1)),
     )
     
     # Log model parameter count
