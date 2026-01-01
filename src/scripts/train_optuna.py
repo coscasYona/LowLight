@@ -165,9 +165,9 @@ def objective(trial, base_config_overrides, config_path, config_name, study_name
     attn_type = trial.suggest_categorical('attn_type', ['linear', 'channel'])
     scheduler = trial.suggest_categorical('scheduler', ['ddpm', 'ddim'])
     
-    # Loss weights
-    l1_weight = trial.suggest_float('l1_weight', 0.5, 1.0)
-    gradient_weight = trial.suggest_float('gradient_weight', 0.01, 0.1)
+    # Loss weights - search around legacy values that worked (0.8, 0.1)
+    l1_weight = trial.suggest_float('l1_weight', 0.7, 0.95)  # Legacy: 0.8
+    gradient_weight = trial.suggest_float('gradient_weight', 0.05, 0.15)  # Legacy: 0.1
     
     # Hybrid x0 loss: DISABLED - causes training instability
     # Using standard HybridDiffusionLoss which matches legacy behavior

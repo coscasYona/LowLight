@@ -30,8 +30,9 @@ training:
   ssim_weight: 0.3           # SSIM weight in hybrid x0 loss (preserves structure)
   
   # Loss weights (shared between standard and enhanced loss)
-  l1_weight: 0.35           # Weight for L1 loss (0.0-1.0 mix in standard, direct weight in enhanced)
-  gradient_weight: 0.05     # Weight for gradient loss (edge preservation)
+  # LEGACY VALUES THAT WORKED: l1_weight=0.8, gradient_weight=0.1
+  l1_weight: 0.8            # Weight for L1 loss - higher = sharper images, less blur
+  gradient_weight: 0.1      # Weight for gradient loss (edge preservation)
   
   # Enhanced loss specific weights (only used when use_enhanced_loss: true)
   mse_weight: 0.25          # Weight for MSE loss component
