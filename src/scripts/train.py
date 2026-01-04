@@ -112,13 +112,6 @@ def train_with_config(cfg: DictConfig) -> float:
     # Set seed for reproducibility
     seed = int(cfg.get('seed', 42))
     pl.seed_everything(seed, workers=True)
-    import torch
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-        # Set deterministic flags before model creation
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
     
     # Create directories
     os.makedirs(cfg.paths.save_dir, exist_ok=True)
