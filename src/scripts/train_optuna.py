@@ -64,9 +64,6 @@ def objective(trial, base_config_overrides, config_path, config_name):
         f'training.gradient_weight={gradient_weight}',
     ])
     
-    # Force single GPU for Optuna trials (multi-GPU requires torchrun, not compatible with Optuna)
-    trial_overrides.append('hardware.devices=1')
-    
     # Unique save path for this trial
     trial_id = trial.number
     trial_overrides.append(f'paths.save_dir=./checkpoints/optuna_trial_{trial_id}')

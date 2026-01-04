@@ -230,7 +230,6 @@ def train_with_config(cfg: DictConfig) -> float:
         accelerator=cfg.hardware.accelerator,
         devices=cfg.hardware.devices,
         precision=cfg.hardware.precision,
-        strategy='auto',  # Let Lightning choose strategy based on device count
         callbacks=callbacks,
         logger=logger,
         log_every_n_steps=cfg.logging.log_every_n_steps,
