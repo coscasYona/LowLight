@@ -64,8 +64,8 @@ def objective(trial, base_config_overrides, config_path, config_name):
         f'training.gradient_weight={gradient_weight}',
     ])
     
-    # Force single GPU for Optuna trials (multi-GPU requires torchrun, not compatible with Optuna)
-    trial_overrides.append('hardware.devices=1')
+    # Multi-GPU is now supported via ddp_spawn strategy (automatically detected in train.py)
+    # No need to override devices - use config default or let it auto-detect
     
     # Unique save path for this trial
     trial_id = trial.number
