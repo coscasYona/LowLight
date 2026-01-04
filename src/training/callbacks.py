@@ -292,6 +292,10 @@ class ImageLoggingCallback(Callback):
         pl_module: pl.LightningModule
     ):
         """Log images at end of validation epoch."""
+        # Only run on rank 0 to avoid DDP deadlocks from model.sample()
+        if trainer.global_rank != 0:
+            return
+            
         if not self.log_validation_images:
             return
 
