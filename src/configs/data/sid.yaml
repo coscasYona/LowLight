@@ -11,7 +11,7 @@ val_list: dataset/Sony_val.txt
 
 # Data loading
 batch_size: 1
-num_workers: 32
+num_workers: 4
 pin_memory: true
 patch_size: 512
 
