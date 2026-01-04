@@ -225,37 +225,12 @@ def train_with_config(cfg: DictConfig) -> float:
     
     # Create trainer
     # Trainer configuration
-    # Determine strategy: use ddp_spawn when running without torchrun (e.g., Optuna)
-    # ddp_spawn creates new processes and works without distributed launcher
-    devices = cfg.hardware.devices
-    
-    # Check if we're in a torchrun environment (has RANK env var)
-    import os
-    is_torchrun = 'RANK' in os.environ or 'LOCAL_RANK' in os.environ
-    
-    # Determine actual device count for strategy selection
-    if isinstance(devices, str) and devices == 'auto':
-        import torch
-        device_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    elif isinstance(devices, int):
-        device_count = devices
-    elif isinstance(devices, list):
-        device_count = len(devices)
-    else:
-        device_count = 1
-    
-    # Choose strategy: ddp_spawn for Optuna (no torchrun), ddp for torchrun
-    if device_count > 1:
-        strategy = 'ddp' if is_torchrun else 'ddp_spawn'
-    else:
-        strategy = 'auto'
-    
     trainer_kwargs = dict(
         max_epochs=cfg.training.epochs,
         accelerator=cfg.hardware.accelerator,
         devices=cfg.hardware.devices,
         precision=cfg.hardware.precision,
-        strategy=strategy,
+        strategy='auto',  # Let Lightning choose strategy based on device count
         callbacks=callbacks,
         logger=logger,
         log_every_n_steps=cfg.logging.log_every_n_steps,
