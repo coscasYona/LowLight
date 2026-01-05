@@ -213,8 +213,17 @@ def train_with_config(cfg: DictConfig) -> float:
     trainable_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameter count: {param_count} (trainable: {trainable_count})")
     
+    # Check if running under torchrun (distributed training)
+    is_torchrun = 'RANK' in os.environ or 'LOCAL_RANK' in os.environ
+    world_size = int(os.environ.get('WORLD_SIZE', '1'))
+    local_rank = int(os.environ.get('LOCAL_RANK', '0'))
+    
     # Create callbacks
     callbacks = create_callbacks(cfg)
+    
+    # Remove progress bar for non-rank-0 processes (Lightning conflicts with enable_progress_bar=False)
+    if is_torchrun and local_rank != 0:
+        callbacks = [cb for cb in callbacks if not isinstance(cb, RichProgressBar)]
     
     # Create logger
     logger = TensorBoardLogger(
@@ -224,20 +233,39 @@ def train_with_config(cfg: DictConfig) -> float:
     )
     
     # Create trainer
-    # Trainer configuration
-    trainer_kwargs = dict(
-        max_epochs=cfg.training.epochs,
-        accelerator=cfg.hardware.accelerator,
-        devices=cfg.hardware.devices,
-        precision=cfg.hardware.precision,
-        callbacks=callbacks,
-        logger=logger,
-        log_every_n_steps=cfg.logging.log_every_n_steps,
-        gradient_clip_val=cfg.training.grad_clip_max if cfg.training.use_grad_clip else None,
-        deterministic=False,
-        enable_progress_bar=True,
-        enable_model_summary=True,
-    )
+    if is_torchrun and world_size > 1:
+        # torchrun sets up distributed environment - use ddp strategy
+        trainer_kwargs = dict(
+            max_epochs=cfg.training.epochs,
+            accelerator='gpu',
+            devices='auto',
+            strategy='ddp',
+            precision=cfg.hardware.precision,
+            callbacks=callbacks,
+            logger=logger,
+            log_every_n_steps=cfg.logging.log_every_n_steps,
+            gradient_clip_val=cfg.training.grad_clip_max if cfg.training.use_grad_clip else None,
+            deterministic=False,
+            enable_progress_bar=(local_rank == 0),
+            enable_model_summary=(local_rank == 0),
+        )
+        if local_rank == 0:
+            print(f"Running under torchrun: world_size={world_size}")
+    else:
+        # Standard single-GPU training (Optuna launches torchrun for multi-GPU)
+        trainer_kwargs = dict(
+            max_epochs=cfg.training.epochs,
+            accelerator=cfg.hardware.accelerator,
+            devices=1,  # Single GPU when not using torchrun
+            precision=cfg.hardware.precision,
+            callbacks=callbacks,
+            logger=logger,
+            log_every_n_steps=cfg.logging.log_every_n_steps,
+            gradient_clip_val=cfg.training.grad_clip_max if cfg.training.use_grad_clip else None,
+            deterministic=False,
+            enable_progress_bar=True,
+            enable_model_summary=True,
+        )
 
     # Optional debug knobs (can be passed via CLI as e.g. trainer.limit_train_batches=1)
     if hasattr(cfg, "trainer"):
@@ -267,6 +295,17 @@ def train_with_config(cfg: DictConfig) -> float:
     best_model_path = trainer.checkpoint_callback.best_model_path
     best_val_loss = trainer.checkpoint_callback.best_model_score
     
+    final_loss = float(best_val_loss) if best_val_loss is not None else float('inf')
+    
+    # Write loss to file for Optuna to read (on rank 0 only for multi-GPU)
+    rank_0 = int(os.environ.get('LOCAL_RANK', '0')) == 0
+    if rank_0:
+        os.makedirs(cfg.paths.save_dir, exist_ok=True)
+        loss_file = os.path.join(cfg.paths.save_dir, 'final_loss.txt')
+        with open(loss_file, 'w') as f:
+            f.write(str(final_loss))
+        print(f"Final loss written to: {loss_file}")
+    
     print("\n" + "=" * 60)
     print("Training completed!")
     print(f"Best model: {best_model_path}")
@@ -276,7 +315,7 @@ def train_with_config(cfg: DictConfig) -> float:
         print("Best validation loss: N/A")
     print("=" * 60)
     
-    return float(best_val_loss) if best_val_loss is not None else float('inf')
+    return final_loss
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="train")

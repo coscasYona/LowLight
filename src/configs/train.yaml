@@ -51,7 +51,7 @@ checkpoint:
   monitor: val/loss  # Alternative: val/psnr with mode: max
   mode: min
   save_last: true
-  filename: "epoch_{epoch:04d}_val_loss_{val/loss:.4f}"
+  filename: "best-epoch-{epoch:04d}"
 
 # Logging
 logging:

@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import argparse
+import subprocess
 import optuna
 from optuna.trial import TrialState
 
@@ -24,7 +25,7 @@ import pytorch_lightning as pl
 from train import train_with_config
 
 
-def objective(trial, base_config_overrides, config_path, config_name):
+def objective(trial, base_config_overrides, config_path, config_name, use_torchrun, num_gpus):
     """Optuna objective function - wraps training with suggested hyperparameters."""
     
     # Suggest hyperparameters
@@ -64,10 +65,11 @@ def objective(trial, base_config_overrides, config_path, config_name):
         f'training.gradient_weight={gradient_weight}',
     ])
     
-    # Unique save path for this trial
+    # Unique save path for this trial (use absolute paths for torchrun compatibility)
     trial_id = trial.number
-    trial_overrides.append(f'paths.save_dir=./checkpoints/optuna_trial_{trial_id}')
-    trial_overrides.append(f'paths.log_dir=./logs/optuna_trial_{trial_id}')
+    workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    trial_overrides.append(f'paths.save_dir={workspace_root}/checkpoints/optuna_trial_{trial_id}')
+    trial_overrides.append(f'paths.log_dir={workspace_root}/logs/optuna_trial_{trial_id}')
     
     # Reduce epochs for faster sweeps (can be overridden via base_overrides)
     has_epochs_override = any('training.epochs=' in override for override in trial_overrides)
@@ -87,9 +89,110 @@ def objective(trial, base_config_overrides, config_path, config_name):
         cfg = compose(config_name=config_name, overrides=trial_overrides)
         
         try:
-            # Run training and capture final loss
-            final_loss = train_with_config(cfg)
-            return final_loss if final_loss is not None and final_loss != float('inf') else float('inf')
+            if use_torchrun:
+                # Use torchrun to launch training with multi-GPU support
+                # Use train_distributed.py which doesn't use Hydra's main decorator
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                train_script = os.path.join(script_dir, 'train_distributed.py')
+                
+                # Serialize config to JSON to pass to distributed script
+                config_json = json.dumps(OmegaConf.to_container(cfg, resolve=True))
+                
+                # Build command - train_distributed.py reads config from env var
+                # Use a unique master port per trial to avoid conflicts
+                master_port = 29500 + (trial_id % 100)  # Port range 29500-29599
+                cmd = [
+                    'torchrun',
+                    '--nproc_per_node', str(num_gpus),
+                    '--nnodes', '1',
+                    '--node_rank', '0',
+                    '--master_addr', 'localhost',
+                    '--master_port', str(master_port),
+                    train_script
+                ]
+                
+                # Set environment to mark that we're running under torchrun
+                # Override CUDA_VISIBLE_DEVICES to use all GPUs for training
+                env = os.environ.copy()
+                env['USE_TORCHRUN'] = '1'
+                env['TORCHRUN_NUM_GPUS'] = str(num_gpus)
+                env['TRAIN_CONFIG_JSON'] = config_json  # Pass config via environment
+                # Enable detailed error reporting for torchrun
+                os.makedirs(cfg.paths.save_dir, exist_ok=True)
+                env['TORCHELASTIC_ERROR_FILE'] = os.path.join(cfg.paths.save_dir, f'torchrun_error_rank_{{rank}}.log')
+                # Set CUDA_VISIBLE_DEVICES in subprocess to use all GPUs for distributed training
+                # This allows torchrun to access all GPUs even if parent process has limited visibility
+                if num_gpus == 4:
+                    env['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
+                else:
+                    # For other numbers, use first N GPUs
+                    env['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, range(num_gpus)))
+                print(f"Launching torchrun with CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']}")
+                
+                # Run training via torchrun
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        env=env,
+                        cwd=os.path.dirname(script_dir),  # Run from src/ directory
+                        capture_output=False,  # Show output in real-time
+                        check=False
+                    )
+                except KeyboardInterrupt:
+                    # User interrupted - mark trial as interrupted
+                    print(f"\nTrial {trial_id} interrupted by user")
+                    trial.set_user_attr('status', 'interrupted')
+                    raise  # Re-raise to let Optuna handle it properly
+                
+                if result.returncode != 0:
+                    # Check if it was interrupted (SIGINT = -2 on Unix)
+                    if result.returncode == -2 or result.returncode == 130:  # SIGINT
+                        print(f"Trial {trial_id} was interrupted")
+                        trial.set_user_attr('status', 'interrupted')
+                        raise KeyboardInterrupt("Trial interrupted")
+                    
+                    # Check for error log files
+                    error_log_pattern = os.path.join(cfg.paths.save_dir, 'torchrun_error_rank_*.log')
+                    import glob
+                    error_logs = glob.glob(error_log_pattern)
+                    if error_logs:
+                        print(f"\nTrial {trial_id} failed. Error logs found:")
+                        for log_file in error_logs:
+                            print(f"  - {log_file}")
+                            try:
+                                with open(log_file, 'r') as f:
+                                    error_content = f.read()
+                                    if error_content:
+                                        print(f"    Error content:\n{error_content[:500]}")  # First 500 chars
+                            except:
+                                pass
+                    
+                    print(f"Trial {trial_id} failed with return code {result.returncode}")
+                    print(f"Check logs in: {cfg.paths.save_dir}")
+                    return float('inf')
+                
+                # Read the final loss from the file written by train.py
+                loss_file = os.path.join(cfg.paths.save_dir, 'final_loss.txt')
+                if os.path.exists(loss_file):
+                    try:
+                        with open(loss_file, 'r') as f:
+                            final_loss = float(f.read().strip())
+                        print(f"Trial {trial_id} completed with loss: {final_loss:.6f}")
+                        return final_loss
+                    except Exception as e:
+                        print(f"Failed to read loss file {loss_file}: {e}")
+                        return float('inf')
+                else:
+                    print(f"Loss file not found: {loss_file}")
+                    return float('inf')
+            else:
+                # Direct call (single GPU or no torchrun)
+                final_loss = train_with_config(cfg)
+                return final_loss if final_loss is not None and final_loss != float('inf') else float('inf')
+        except KeyboardInterrupt:
+            # Re-raise KeyboardInterrupt to allow Optuna to handle it gracefully
+            print(f"\nTrial {trial_id} interrupted by user")
+            raise
         except Exception as e:
             print(f"Trial {trial_id} failed: {e}")
             import traceback
@@ -123,6 +226,12 @@ def main():
                        help='Model config override (e.g., emva1288, unet)')
     parser.add_argument('--epochs', type=int, default=None,
                        help='Number of epochs per trial (overrides default sweep epochs)')
+    
+    # Multi-GPU configuration
+    parser.add_argument('--use-torchrun', action='store_true', default=True,
+                       help='Use torchrun for multi-GPU training (default: True)')
+    parser.add_argument('--num-gpus', type=int, default=4,
+                       help='Number of GPUs to use for training (default: 4)')
     
     # Parse args
     args, remaining = parser.parse_known_args()
@@ -186,6 +295,11 @@ def main():
         study = optuna.load_study(study_name=args.study_name, storage=storage)
         print(f"Loaded existing study: {args.study_name}")
     
+    # Note: We use n_jobs=1 to ensure Optuna runs trials sequentially
+    # This prevents Optuna from trying to use multiple GPUs for parallel trials
+    # When launching torchrun, we'll set CUDA_VISIBLE_DEVICES in the subprocess
+    # to use all 4 GPUs for distributed training
+    
     print(f"\nStarting optimization: {args.n_trials} trials")
     print(f"Study: {args.study_name}")
     print(f"Database: {storage}")
@@ -193,13 +307,20 @@ def main():
     print(f"Config name: {args.config_name}")
     if base_overrides:
         print(f"Base overrides: {base_overrides}")
+    print(f"Using torchrun: {args.use_torchrun}")
+    if args.use_torchrun:
+        print(f"Number of GPUs per trial: {args.num_gpus}")
+        print("Note: Optuna runs trials sequentially (n_jobs=1)")
+        print("      torchrun will use all GPUs for each trial")
     print()
     
     # Run optimization
     study.optimize(
-        lambda trial: objective(trial, base_overrides, config_path, args.config_name),
+        lambda trial: objective(trial, base_overrides, config_path, args.config_name, 
+                               args.use_torchrun, args.num_gpus),
         n_trials=args.n_trials,
         show_progress_bar=True,
+        n_jobs=1,  # Run trials sequentially (one at a time)
     )
     
     # Print results

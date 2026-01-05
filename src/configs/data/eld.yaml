@@ -1,10 +1,16 @@
 # ELD (Extreme Low-light Denoising) Dataset Configuration
+# Note: ELD uses SID-format training data; ELD-specific config is for evaluation
 
 # Dataset type
 type: eld
 
-# Paths
-train_dir: ${oc.env:ELD_DATASET_PATH,../dataset/ELD_new}
+# Training paths (uses SID-format data for training)
+train_dir: ${oc.env:SID_DATASET_PATH,data/SID/Sony2025/Sony}
+val_dir: ${oc.env:SID_DATASET_PATH,data/SID/Sony2025/Sony}
+train_list: dataset/Sony_train.txt
+val_list: dataset/Sony_val.txt
+
+# Evaluation paths (ELD-specific)
 eval_dir: ${oc.env:ELD_DATASET_PATH,../dataset/ELD_new}
 
 # Camera settings
@@ -25,4 +31,9 @@ img_ids_set2: [5, 10, 15]
 batch_size: 1
 num_workers: 4
 pin_memory: true
+patch_size: 256
 
+# Dataset flags
+use_sid_raw: true
+use_fuji_raw: false
+val_split: 0.1
