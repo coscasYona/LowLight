@@ -7,6 +7,7 @@ base_channels: 64
 channel_mults: [1, 2, 4, 8]
 
 # Diffusion settings
+# Note: num_steps=4 is fast for training; use 50-200 for sharper inference
 num_steps: 4
 time_embed_dim: 128
 cond_embed_dim: 64
@@ -14,11 +15,13 @@ cond_embed_dim: 64
 # Attention type: "linear" (O(n) memory), "channel" (most efficient)
 attn_type: linear
 
-# Scheduler: "ddpm" (stochastic), "ddim" (deterministic, faster)
-scheduler: ddim
+# Scheduler: "ddpm" (stochastic - matches legacy), "ddim" (deterministic, faster inference)
+# Use ddpm for training to match legacy convergence behavior
+scheduler: ddpm
 
-# Noise schedule: "linear" or "cosine"
-schedule_type: cosine
+# Noise schedule: "linear" (matches legacy) or "cosine" (improved DDPM paper)
+# Use linear to match legacy training behavior
+schedule_type: linear
 
 # EMVA 1288 noise model settings
 camera_type: SonyA7S2

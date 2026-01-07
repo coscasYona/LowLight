@@ -16,16 +16,18 @@ training:
   use_ema: false
   ema_decay: 0.9999
   
-  # Loss configuration
-  loss_scale: 10.0           # Overall loss scaling factor (increases gradient magnitude) - matches legacy default
+  # Loss configuration - matches legacy training defaults for proven convergence
+  loss_scale: 10.0           # Overall loss scaling factor (increases gradient magnitude)
   
   # Enhanced SOTA loss function (set use_enhanced_loss: true to enable)
   # Combines MSE, L1, Charbonnier, frequency-domain, and multi-scale gradient losses
-  use_enhanced_loss: true   # Set to true for SOTA edge preservation
+  # NOTE: Set to false for legacy-compatible training (better convergence proven)
+  use_enhanced_loss: false   # Use simple MSE+L1+gradient loss like legacy
   
-  # Loss weights (shared between standard and enhanced loss)
-  l1_weight: 0.35           # Weight for L1 loss (0.0-1.0 mix in standard, direct weight in enhanced)
-  gradient_weight: 0.05     # Weight for gradient loss (edge preservation)
+  # Loss weights matching legacy training (proven to converge well):
+  # base_weight * ((1 - l1_weight) * MSE + l1_weight * L1) + gradient_weight * gradient_loss
+  l1_weight: 0.8             # Weight for L1 loss vs MSE (legacy default: 0.8)
+  gradient_weight: 0.1       # Weight for gradient loss (legacy default: 0.1)
   
   # Enhanced loss specific weights (only used when use_enhanced_loss: true)
   mse_weight: 0.25          # Weight for MSE loss component

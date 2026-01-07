@@ -287,22 +287,49 @@ class EMVA1288LightningModule(pl.LightningModule):
         )
 
         # Compute loss with high precision tensors
-        loss = self.loss_fn(pred_noise, actual_noise)
+        # Use return_components to get detailed loss breakdown
+        if hasattr(self.loss_fn, 'forward') and 'return_components' in self.loss_fn.forward.__code__.co_varnames:
+            loss, loss_components = self.loss_fn(pred_noise, actual_noise, return_components=True)
+        else:
+            loss = self.loss_fn(pred_noise, actual_noise)
+            loss_components = None
         
-        # DEBUG: Verify gradients will flow (only on first batch of first epoch)
-        if batch_idx == 0 and self.current_epoch == 0:
-            print(f"\n=== GRADIENT DEBUG INFO ===")
-            print(f"loss.requires_grad = {loss.requires_grad}")
-            print(f"pred_noise.requires_grad = {pred_noise.requires_grad}")
-            print(f"actual_noise.requires_grad = {actual_noise.requires_grad}")
-            print(f"loss.item() = {loss.item():.6f}")
-            print(f"pred_noise.mean() = {pred_noise.mean().item():.6f}")
-            print(f"actual_noise.mean() = {actual_noise.mean().item():.6f}")
+        # DEBUG: Enhanced logging (first batch of first epoch and every 100 steps)
+        is_debug_step = (batch_idx == 0 and self.current_epoch == 0) or (self.global_step % 100 == 0)
+        if is_debug_step:
+            # Compute noise statistics for comparison with legacy
+            with torch.no_grad():
+                pred_mean = pred_noise.mean().item()
+                pred_std = pred_noise.std().item()
+                actual_mean = actual_noise.mean().item()
+                actual_std = actual_noise.std().item()
+                noise_mse = ((pred_noise - actual_noise) ** 2).mean().item()
+                
+            if batch_idx == 0 and self.current_epoch == 0:
+                print(f"\n=== TRAINING DEBUG INFO (Epoch 0, Batch 0) ===")
+                print(f"loss.requires_grad = {loss.requires_grad}")
+                print(f"pred_noise.requires_grad = {pred_noise.requires_grad}")
+                print(f"model parameters require_grad = {any(p.requires_grad for p in self.model.parameters())}")
+                print(f"Loss (scaled): {loss.item():.6f}")
+                print(f"Loss (unscaled): {loss.item() / self.loss_fn.loss_scale:.6f}")
+                if loss_components:
+                    print(f"Loss components: MSE={loss_components.get('mse', 0):.6f}, "
+                          f"L1={loss_components.get('l1', 0):.6f}, "
+                          f"Gradient={loss_components.get('gradient', 0):.6f}")
+                print(f"Predicted noise: mean={pred_mean:.6f}, std={pred_std:.6f}")
+                print(f"Actual noise: mean={actual_mean:.6f}, std={actual_std:.6f}")
+                print(f"Noise MSE: {noise_mse:.6f}")
+                print(f"Legacy comparison: loss should be ~0.1-1.0 (unscaled), noise std ~1.0")
+                print("=" * 50 + "\n")
             
-            # Check if model parameters require grad
-            param_requires_grad = any(p.requires_grad for p in self.model.parameters())
-            print(f"model parameters require_grad = {param_requires_grad}")
-            print("=" * 30 + "\n")
+            # Log noise statistics for TensorBoard
+            self.log('debug/pred_noise_mean', pred_mean, on_step=True)
+            self.log('debug/pred_noise_std', pred_std, on_step=True)
+            self.log('debug/noise_mse', noise_mse, on_step=True)
+            if loss_components:
+                self.log('debug/loss_mse', loss_components.get('mse', 0), on_step=True)
+                self.log('debug/loss_l1', loss_components.get('l1', 0), on_step=True)
+                self.log('debug/loss_gradient', loss_components.get('gradient', 0), on_step=True)
         
         # Check for NaN loss
         if not torch.isfinite(loss):
@@ -507,16 +534,13 @@ class EMVA1288LightningModule(pl.LightningModule):
             lr=self.learning_rate
         )
         
-        # LR schedule matching legacy training:
-        # - Epoch 0-9: warmup from 1e-5 to 1e-4 (×0.1 to ×1.0)
-        # - Epoch 10-99: 1e-4 (×1.0)
+        # LR schedule matching legacy training exactly:
+        # - Epoch 0-99: 1e-4 (×1.0) - no warmup like legacy
         # - Epoch 100-179: 5e-5 (×0.5)
         # - Epoch 180+: 1e-5 (×0.1)
         def lr_lambda(epoch):
-            if epoch < 10:
-                return 0.1 + 0.9 * (epoch / 9)  # Warmup from 0.1x to 1.0x
-            elif epoch < 100:
-                return 1.0  # 1e-4
+            if epoch < 100:
+                return 1.0  # 1e-4 (no warmup - matches legacy)
             elif epoch < 180:
                 return 0.5  # 5e-5
             else:

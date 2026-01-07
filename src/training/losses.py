@@ -130,12 +130,12 @@ class HybridDiffusionLoss(nn.Module):
         pred = pred.float()
         target = target.float()
 
-        # Clean up NaN/inf values
+        # Clean up NaN/inf values (replace with zeros)
         pred = torch.where(torch.isfinite(pred), pred, torch.zeros_like(pred))
         target = torch.where(torch.isfinite(target), target, torch.zeros_like(target))
 
-        # Clamp to prevent extreme values
-        pred = torch.clamp(pred, min=-10.0, max=10.0)
+        # Only clamp target (not pred) to match legacy training behavior
+        # Clamping pred would clip gradients and hurt training
         target = torch.clamp(target, min=-10.0, max=10.0)
         
         # Compute individual losses
@@ -621,12 +621,12 @@ class EnhancedHybridLoss(nn.Module):
         pred = pred.float()
         target = target.float()
         
-        # Clean up NaN/inf values
+        # Clean up NaN/inf values (replace with zeros)
         pred = torch.where(torch.isfinite(pred), pred, torch.zeros_like(pred))
         target = torch.where(torch.isfinite(target), target, torch.zeros_like(target))
         
-        # Clamp to prevent extreme values
-        pred = torch.clamp(pred, min=-10.0, max=10.0)
+        # Only clamp target (not pred) to match legacy training behavior
+        # Clamping pred would clip gradients and hurt training
         target = torch.clamp(target, min=-10.0, max=10.0)
         
         # Compute individual losses
