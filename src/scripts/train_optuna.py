@@ -28,25 +28,28 @@ from train import train_with_config
 def objective(trial, base_config_overrides, config_path, config_name, use_torchrun, num_gpus):
     """Optuna objective function - wraps training with suggested hyperparameters."""
     
-    # Suggest hyperparameters
+    # ==========================================================================
+    # FIXED ARCHITECTURE PARAMETERS (not searched by Optuna)
+    # These are fixed to ensure consistent model size (~25M params, ~100MB)
+    # and fair comparison between trials
+    # ==========================================================================
+    base_channels = 64          # Fixed: good balance of capacity and speed
+    channel_mults = [1, 2, 4, 8]  # Fixed: full depth for quality
+    num_steps = 8               # Fixed: good balance for DDIM scheduler
+    patch_size = 256            # Fixed: reasonable training patch size
+    attn_type = 'linear'        # Fixed: memory-efficient attention
+    scheduler = 'ddim'          # Fixed: faster inference with deterministic sampling
+    
+    # ==========================================================================
+    # OPTIMIZED HYPERPARAMETERS (searched by Optuna)
+    # Focus on training dynamics rather than architecture
+    # ==========================================================================
     learning_rate = trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_int('batch_size', 1, 3, step=1)  # Limited for laptop constraints
-    base_channels = trial.suggest_categorical('base_channels', [32, 64, 128])
+    batch_size = trial.suggest_int('batch_size', 1, 4, step=1)  # Hardware-dependent
     
-    # Channel multipliers as string (Optuna doesn't support lists in categorical)
-    channel_mults_options = ['1,2', '1,2,4', '1,2,4,8']
-    channel_mults_str = trial.suggest_categorical('channel_mults', channel_mults_options)
-    # Convert to list for display and Hydra
-    channel_mults = [int(x) for x in channel_mults_str.split(',')]
-    
-    num_steps = trial.suggest_int('num_steps', 4, 64)
-    patch_size = trial.suggest_categorical('patch_size', [128, 256, 512])
-    attn_type = trial.suggest_categorical('attn_type', ['linear', 'channel'])
-    scheduler = trial.suggest_categorical('scheduler', ['ddpm', 'ddim'])
-    
-    # Optional: suggest loss weights
-    l1_weight = trial.suggest_float('l1_weight', 0.5, 1.0)
-    gradient_weight = trial.suggest_float('gradient_weight', 0.01, 0.1)
+    # Loss weights - critical for balancing reconstruction vs edge preservation
+    l1_weight = trial.suggest_float('l1_weight', 0.3, 0.9)
+    gradient_weight = trial.suggest_float('gradient_weight', 0.01, 0.15)
     
     # Build Hydra config overrides for this trial
     trial_overrides = base_config_overrides.copy()
@@ -71,14 +74,14 @@ def objective(trial, base_config_overrides, config_path, config_name, use_torchr
     trial_overrides.append(f'paths.save_dir={workspace_root}/checkpoints/optuna_trial_{trial_id}')
     trial_overrides.append(f'paths.log_dir={workspace_root}/logs/optuna_trial_{trial_id}')
     
-    # Reduce epochs for faster sweeps (can be overridden via base_overrides)
+    # Set epochs for sweeps (can be overridden via base_overrides or --epochs)
     has_epochs_override = any('training.epochs=' in override for override in trial_overrides)
     if not has_epochs_override:
-        trial_overrides.append('training.epochs=20')  # Default for sweeps
+        trial_overrides.append('training.epochs=50')  # Default for sweeps (enough for convergence signal)
     
     print(f"\nTrial {trial_id}: lr={learning_rate:.6f}, bs={batch_size}, "
-          f"ch={base_channels}, mults={channel_mults}, steps={num_steps}, "
-          f"patch={patch_size}, attn={attn_type}, sched={scheduler}")
+          f"l1_w={l1_weight:.3f}, grad_w={gradient_weight:.3f} "
+          f"[fixed: ch={base_channels}, mults={channel_mults}, steps={num_steps}]")
     
     # Clear any existing Hydra instance
     GlobalHydra.instance().clear()
