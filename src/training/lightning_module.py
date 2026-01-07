@@ -250,13 +250,15 @@ class EMVA1288LightningModule(pl.LightningModule):
         if self.use_edge_cond:
             edge_feat = self.model.compute_edge_features(img_gt)
         
-        # Use physics-based noise for training to match validation
-        # This ensures the model learns the correct noise distribution
+        # Use simple Gaussian noise for training (matching legacy implementation)
+        # Physics noise is signal-dependent and creates an impossible learning target
+        # The model learns to denoise Gaussian while physics conditioning (ISO/ratio)
+        # enables generalization to real CMOS noise at inference time
         noisy_state = self.model.q_sample(
             img_gt, base_noise, timesteps,
             iso=iso, ratio=ratio,
             camera_params=camera_params,
-            use_physics_noise=True,
+            use_physics_noise=False,  # Simple Gaussian - stable training target
         )
 
         # Predict noise (with measurement and edge conditioning if enabled)
@@ -271,26 +273,11 @@ class EMVA1288LightningModule(pl.LightningModule):
             edge_feat=edge_feat,
         )
 
-        # Compute actual noise using the same formula as validation
-        # Even with physics noise, we compute the theoretical noise for loss computation
-        # Ensure high precision for noise computation to avoid gradient issues
-        sqrt_alpha = self.model._extract(
-            self.model.sqrt_alphas_cumprod, timesteps, img_gt.shape
-        ).float()  # Ensure float32
-        sqrt_one_minus_alpha = self.model._extract(
-            self.model.sqrt_one_minus_alphas_cumprod, timesteps, img_gt.shape
-        ).float()  # Ensure float32
-        sqrt_one_minus_alpha_safe = torch.clamp(sqrt_one_minus_alpha, min=1e-6)
-
-        # Compute noise in high precision
-        # NOTE: actual_noise is the target, so it doesn't need gradients
-        # Detaching ensures clean gradient flow through pred_noise only
-        actual_noise = (noisy_state.float() - sqrt_alpha * img_gt.float()) / sqrt_one_minus_alpha_safe
-        actual_noise = torch.where(
-            torch.isfinite(actual_noise), actual_noise, torch.zeros_like(actual_noise)
-        )
-        actual_noise = actual_noise.detach()  # Detach target to ensure clean gradient flow
-        actual_noise = torch.clamp(actual_noise, min=-10.0, max=10.0)
+        # With use_physics_noise=False, the target is exactly base_noise
+        # q_sample returns: sqrt_alpha * x_start + sqrt_one_minus_alpha * base_noise
+        # So: (noisy_state - sqrt_alpha * x_start) / sqrt_one_minus_alpha = base_noise
+        # Using base_noise directly avoids numerical instability from the division
+        actual_noise = base_noise.detach()  # Detach target to ensure clean gradient flow
 
         # Ensure predicted noise is also in high precision
         # CRITICAL: pred_noise MUST keep gradients for backprop
